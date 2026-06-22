@@ -47,3 +47,11 @@ wandb/
 *.ico
 *.webp
 check.md
+
+# Session artifacts (sbatch stdout, server logs, tool state, local env, scratch)
+*.out
+logs/
+.omc/
+test_video.mp4
+capx_activate.sh
+ISSUE_*.md

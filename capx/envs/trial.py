@@ -280,6 +280,7 @@ def _capture_initial_visual_feedback(
         description = _describe_initial_scene(
             visual_differencing_args, task_description, initial_base64,
             wrist_image_base64=initial_wrist_base64,
+            turn_tag="turn0",  # VDM I/O (prompt + input image → output text) logged inside for the viz tool
         )
         feedback = f"The initial state of the environment is described as follows:\n{description}"
         obs["full_prompt"][-1]["content"][0]["text"] += f"\n\n{feedback}"
@@ -289,11 +290,44 @@ def _capture_initial_visual_feedback(
     return visual_feedback_imgs, visual_feedback_base64_history, task_description
 
 
+def _vdm_prompt_to_text(prompt: list[dict[str, Any]]) -> str:
+    """Flatten a VDM chat prompt to readable text (images replaced by [이미지]) for the viz tool."""
+    lines = []
+    for m in prompt:
+        c = m.get("content", "")
+        if isinstance(c, list):
+            segs = []
+            for part in c:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        segs.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        segs.append("[이미지]")
+                    else:
+                        segs.append(f"[{part.get('type')}]")
+                else:
+                    segs.append(str(part))
+            c = "\n".join(segs)
+        lines.append(f"────── {m.get('role', '?')} ──────\n{c}")
+    return "\n\n".join(lines)
+
+
+def _log_vdm_io(tool: str, prompt: list[dict[str, Any]], output: str, images: list[str]) -> None:
+    """Record one VDM call (input prompt + input image(s) → output text) for the viz tool."""
+    try:
+        from capx.utils.execution_logger import log_step as _log
+        _log(tool, f"[VDM 입력 프롬프트]\n{_vdm_prompt_to_text(prompt)}\n\n[VDM 출력]\n{output}",
+             images=[im for im in images if im])
+    except Exception:
+        pass
+
+
 def _describe_initial_scene(
     visual_differencing_args: ModelQueryArgs,
     task_description: str,
     image_base64: str,
     wrist_image_base64: str | None = None,
+    turn_tag: str = "turn0",
 ) -> str:
     """Query a VLM to describe the initial environment state."""
     user_content: list[dict[str, Any]] = [
@@ -326,7 +360,10 @@ def _describe_initial_scene(
         },
         {"role": "user", "content": user_content},
     ]
-    return _query_model(visual_differencing_args, prompt)["content"]
+    content = _query_model(visual_differencing_args, prompt)["content"]
+    _log_vdm_io(f"VDM[{turn_tag}] · 초기 장면 묘사 (input prompt + image → output text)",
+                prompt, content, [image_base64, wrist_image_base64])
+    return content
 
 
 def _get_visual_differencing_feedback(
@@ -334,6 +371,7 @@ def _get_visual_differencing_feedback(
     task_description: str,
     visual_feedback_base64_history: list[str],
     wrist_base64_history: list[str] | None = None,
+    turn_tag: str = "turn?",
 ) -> str | None:
     """Query a VLM to describe what changed between the two most recent frames.
 
@@ -383,7 +421,11 @@ def _get_visual_differencing_feedback(
         },
         {"role": "user", "content": user_content},
     ]
-    return _query_model(visual_differencing_args, prompt)["content"]
+    content = _query_model(visual_differencing_args, prompt)["content"]
+    # diff sees TWO images: previous state [-2] and current state [-1]
+    _log_vdm_io(f"VDM[{turn_tag}] · 턴 차이 묘사 (input prompt + 2 images → output text)",
+                prompt, content, [visual_feedback_base64_history[-2], visual_feedback_base64_history[-1]])
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -576,9 +618,11 @@ def _handle_multi_turn_step(
         is_video_feedback = True
     elif config["use_img_differencing"] and len(visual_feedback_base64_history) >= 2:
         # Image-based differencing: pass before/after images to VDM
+        # (VDM I/O — prompt + 2 images → text — is logged inside the function for the viz tool)
         differencing_feedback = _get_visual_differencing_feedback(
             visual_differencing_args, task_description, visual_feedback_base64_history,
             wrist_base64_history=wrist_base64_history,
+            turn_tag=f"turn{code_block_idx}",
         )
 
     # Only pass visual feedback to prompt if visual_feedback is enabled
@@ -644,6 +688,18 @@ def _run_single_trial(
         5. Save artifacts (code, logs, per-turn videos, combined video) and return a TrialSummary.
     """
     trial_start_time = time.time()
+
+    # Reset perception step logger so this trial's images don't accumulate from prior trials,
+    # and enable webui-style logging on the APIs so perception steps (SAM3/grasp images) get
+    # recorded even in headless mode (otherwise _log_step is a no-op and nothing is captured).
+    try:
+        from capx.utils.execution_logger import clear_all_histories
+        clear_all_histories()
+        for _api in getattr(env, "_apis", {}).values():
+            if hasattr(_api, "enable_webui"):
+                _api.enable_webui(True)
+    except Exception:
+        pass
 
     use_video_diff = config.get("use_video_differencing", False)
     use_wrist = config.get("use_wrist_camera", False)
@@ -940,6 +996,19 @@ def _run_single_trial(
             print(f"[SkillLibrary] Skill extraction failed: {exc}")
 
     print(f"Trial {trial} took {time.time() - trial_start_time:.2f} seconds")
+
+    # Persist perception step images (SAM3 / segmentation / grasp) for this trial so the viz tool can show them
+    try:
+        from capx.utils.execution_logger import get_all_histories, get_current_history
+        _perc_dir = os.path.join(config["output_dir"], "perception", f"trial_{trial:02d}")
+        _hists = list(get_all_histories())
+        _cur = get_current_history()           # steps live here until finalized
+        if _cur is not None and _cur not in _hists:
+            _hists.append(_cur)
+        for _h in _hists:
+            _h.save_to_directory(_perc_dir)
+    except Exception as _e:
+        print(f"[perception-save] failed: {_e}")
 
     gc.collect()
 
