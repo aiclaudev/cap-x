@@ -211,6 +211,21 @@ def _save_turn_and_combined_videos(
 # Visual feedback and image differencing
 # ---------------------------------------------------------------------------
 
+def _extract_task_goal(full_task_text: str) -> str:
+    """Return a clean, code-free task goal for the VDM.
+
+    The coder's user prompt bundles the goal together with the full API reference and an
+    "ONLY write the executable Python code" instruction. Handing all of that to the VDM
+    primes a code-capable VLM to emit code instead of a description. Keep only the ``Goal:``
+    line; if there is none, fall back to the text before the ``APIs:`` section.
+    """
+    for line in full_task_text.splitlines():
+        if line.strip().lower().startswith("goal:"):
+            return line.strip()
+    cut = full_task_text.find("APIs:")
+    return (full_task_text[:cut] if cut != -1 else full_task_text).strip()
+
+
 def _capture_initial_visual_feedback(
     env: CodeExecutionEnvBase,
     obs: dict[str, Any],
@@ -240,7 +255,15 @@ def _capture_initial_visual_feedback(
     initial_base64, initial_img = _get_visual_feedback(env)
     visual_feedback_imgs.append(initial_img)
     visual_feedback_base64_history.append(initial_base64)
-    task_description = copy.deepcopy(obs["full_prompt"][-1]["content"][0]["text"])
+    _full_task_text = copy.deepcopy(obs["full_prompt"][-1]["content"][0]["text"])
+    # The coder prompt carries the goal + full API reference + "ONLY write the executable
+    # Python code"; feeding all of that to the VDM primes it to emit code. When vdm_goal_only
+    # is set, hand the VDM just the task goal so it produces a scene description instead.
+    task_description = (
+        _extract_task_goal(_full_task_text)
+        if config.get("vdm_goal_only", False)
+        else _full_task_text
+    )
 
     # Also capture wrist camera image for multiview initial description
     initial_wrist_base64 = None

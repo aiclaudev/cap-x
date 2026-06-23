@@ -157,6 +157,9 @@ def _load_config(args: LaunchArgs) -> tuple[Any, dict[str, Any], list]:
         if getattr(args, "web_ui_port", None) is not None
         else configs_dict.get("web_ui_port", 8200),
         "save_multiturn_prompts": configs_dict.get("save_multiturn_prompts", False),
+        # Feed only the task goal (not the full code-gen prompt + API reference) to the VDM,
+        # so a code-capable VLM describes the scene instead of emitting code. Opt-in; off = original.
+        "vdm_goal_only": configs_dict.get("vdm_goal_only", False),
     }
 
     return env_factory, merged_config, api_servers
