@@ -123,6 +123,21 @@ def _flatten_prompt(obj) -> str:
     return str(obj)
 
 
+def _step_images(perc_dir: Path, blk, si, num_images) -> list:
+    """Images for one step, capped to the step's declared num_images.
+
+    The execution logger leaves stray `block_X_step_N_img_*.jpg` files at control-step indices
+    (IK/move) that declared 0 images; globbing blindly mis-attaches them (and they're duplicates).
+    Trust num_images: 0 → none; N → the first N matched files."""
+    try:
+        n = int(num_images or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n <= 0:
+        return []
+    return sorted(perc_dir.glob(f"block_{blk}_step_{si}_img_*.jpg"))[:n]
+
+
 def load_vdm_by_turn(perc_dir: Path | None) -> dict:
     """Parse execution_history VDM[turnN] steps → {turn_int: [(output_text, [input_img_paths])]}.
 
@@ -143,18 +158,63 @@ def load_vdm_by_turn(perc_dir: Path | None) -> dict:
             if not m:
                 continue
             si = s.get("step_index")
-            imgs = sorted(perc_dir.glob(f"block_{blk}_step_{si}_img_*.jpg"))
+            imgs = _step_images(perc_dir, blk, si, s.get("num_images"))
             out.setdefault(int(m.group(1)), []).append((s.get("text", "") or "", imgs))
     return out
 
 
-def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None) -> str:
+def load_steps_by_turn(perc_dir: Path | None) -> dict:
+    """Segment non-VDM execution steps by turn. The VDM[turnN] marker precedes turn N's code run,
+    so every perception/control step after it (until the next VDM marker) belongs to turn N."""
+    out: dict[int, list] = {}
+    if not (perc_dir and perc_dir.exists()):
+        return out
+    for jf in sorted(perc_dir.glob("execution_history_block_*.json")):
+        try:
+            hist = json.load(open(jf))
+        except Exception:
+            continue
+        blk = hist.get("code_block_index", 0)
+        cur = 0
+        for s in hist.get("steps", []):
+            tool = s.get("tool_name", "") or ""
+            m = re.match(r"VDM\[turn(\d+)\]", tool)
+            if m:
+                cur = int(m.group(1))
+                continue
+            si = s.get("step_index")
+            imgs = _step_images(perc_dir, blk, si, s.get("num_images"))
+            out.setdefault(cur, []).append((tool, (s.get("text", "") or "").strip(), si, imgs))
+    return out
+
+
+def _render_one_step(tool: str, text: str, si, imgfiles: list) -> str:
+    """Render a single perception/control step: no-image → compact one-liner; with-image → card."""
+    if not imgfiles:
+        oneline = text.replace("\n", " ")[:130]
+        return (f'<div class="steprow"><span class="stepnum">#{esc(si)}</span>'
+                f'<span class="badge b-ctrl">{esc(tool)}</span><span>{esc(oneline)}</span></div>')
+    card = [f'<div class="tlcard"><div class="turn-h"><span class="stepnum">#{esc(si)}</span>'
+            f'<span class="badge b-perc">{esc(tool)}</span></div>']
+    if text:
+        card.append(f'<details><summary>출력 텍스트 · {len(text)} chars</summary>'
+                    f'<div class="dbody"><pre>{esc(text[:12000])}</pre></div></details>')
+    card.append('<div class="imgrid">')
+    for p in imgfiles:
+        uri = b64_data_uri(p)
+        if uri:
+            card.append(f'<figure><img src="{uri}"/><figcaption>{esc(p.name)}</figcaption></figure>')
+    card.append('</div></div>')
+    return "".join(card)
+
+
+def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
+                 steps_by_turn: dict | None = None) -> str:
     """One self-contained card per turn, in inference order within the turn:
-    🖼️ VDM (input image → 묘사) → 📥 Coder 입력 → 📤 Coder 출력 → 🎬 실행결과."""
+    🖼️ VDM (input image → 묘사) → 📥 Coder 입력 → 📤 Coder 출력 → 🔧 실행 스텝(perception/control) → 🎬 실행결과."""
     vdm_by_turn = vdm_by_turn or {}
-    turn_videos = sorted(tdir.glob("video_turn_*.mp4"))
+    steps_by_turn = steps_by_turn or {}
     parts = []
-    exec_idx = 0  # index into turn_videos (only executed turns produce a video)
     for i, r in enumerate(responses):
         dec = r.get("decision", "?")
         code = "\n".join(r.get("code_blocks", []) or [])
@@ -219,14 +279,26 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None) -
         parts.append('<details open><summary>📤 Coder 출력 (생성 코드) — 클릭</summary>'
                      '<div class="dbody">' + "".join(out_bits) + '</div></details>')
 
-        # 🎬 EXECUTION RESULT (before→after): the rollout video for this executed turn
-        if dec in ("initial", "regenerate") and exec_idx < len(turn_videos):
-            uri = b64_data_uri(turn_videos[exec_idx])
-            if uri:
-                parts.append(f'<div style="margin-top:8px"><b>🎬 실행결과 (전→후):</b> '
-                             f'<span class="pin">{esc(turn_videos[exec_idx].name)}</span><br>'
-                             f'<video src="{uri}" controls muted loop></video></div>')
-            exec_idx += 1
+        # 🔧 perception/control steps this turn's code actually executed (SAM3 / Molmo / GraspNet / IK / move)
+        tsteps = steps_by_turn.get(turn_key, [])
+        if tsteps:
+            inner = "".join(_render_one_step(t, tx, si, im) for (t, tx, si, im) in tsteps)
+            parts.append(f'<details open><summary>🔧 이 턴의 실행 스텝 ({len(tsteps)}개 — SAM3/Molmo/GraspNet 결과 이미지 + IK/move) — 클릭</summary>'
+                         f'<div class="dbody">{inner}</div></details>')
+
+        # 🎬 EXECUTION RESULT (before→after): video_turn_{i} is saved per turn index, and ONLY
+        # when that turn actually moved the robot (empty frame range → no file). Match by index i,
+        # not sequentially — otherwise a later turn's video gets mis-attached to an earlier (no-op) turn.
+        if dec in ("initial", "regenerate"):
+            vid = tdir / f"video_turn_{i:02d}.mp4"
+            if vid.exists():
+                uri = b64_data_uri(vid)
+                if uri:
+                    parts.append(f'<div style="margin-top:8px"><b>🎬 실행결과 (전→후):</b> '
+                                 f'<span class="pin">{esc(vid.name)}</span><br>'
+                                 f'<video src="{uri}" controls muted loop></video></div>')
+            else:
+                parts.append('<p class="pin">🎬 실행결과: 영상 없음 — 이 턴은 로봇이 움직이지 않음 (코드 에러/무동작)</p>')
         parts.append('</div>')
     return "\n".join(parts)
 
@@ -254,7 +326,7 @@ def render_timeline(perc_dir: Path | None = None) -> str:
             tool = s.get("tool_name", "") or ""
             text = (s.get("text", "") or "").strip()
             si = s.get("step_index")
-            imgfiles = sorted(perc_dir.glob(f"block_{blk}_step_{si}_img_*.jpg"))
+            imgfiles = _step_images(perc_dir, blk, si, s.get("num_images"))
             is_vdm = tool.startswith("VDM")
             # control / no-image step → compact one-liner
             if not is_vdm and not imgfiles:
@@ -390,12 +462,13 @@ def main():
         _m = re.match(r"trial_(\d+)", td.name)
         perc_dir = (root / "perception" / f"trial_{_m.group(1)}") if _m else None
         vdm_by_turn = load_vdm_by_turn(perc_dir)
-        sec.append('<h3>턴별 정리 (VDM 입력·출력 → Coder 입력·출력 → 실행결과)</h3>')
-        sec.append(render_turns(responses, td, vdm_by_turn) if responses else '<p class="muted">all_responses.json 없음</p>')
-        # raw fine-grained inference timeline as a collapsible appendix
+        steps_by_turn = load_steps_by_turn(perc_dir)
+        sec.append('<h3>턴별 정리 (VDM 입출력 → Coder 입출력 → 실행 스텝 perception/control → 영상)</h3>')
+        sec.append(render_turns(responses, td, vdm_by_turn, steps_by_turn) if responses else '<p class="muted">all_responses.json 없음</p>')
+        # raw flat inference timeline kept as a collapsed appendix (per-turn steps are above)
         tl = render_timeline(perc_dir)
         if tl:
-            sec.append('<details><summary>🔬 전체 추론 스텝 타임라인 (perception 포함, raw) — 클릭</summary>'
+            sec.append('<details><summary>🔬 전체 추론 스텝 타임라인 (raw, 전 스텝 한 줄로) — 클릭</summary>'
                        f'<div class="dbody">{tl}</div></details>')
         sec.append(render_media(td, perc_dir))
         sec.append(render_prompts(td))
