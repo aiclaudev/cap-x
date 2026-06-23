@@ -52,6 +52,7 @@ api_servers:
 record_video: true
 use_img_differencing: true
 save_multiturn_prompts: true
+vdm_goal_only: true   # feed the VDM only the task goal, not the full code-gen prompt + API docs
 output_dir: ./outputs/franka_robosuite_cube_stack_multiturn_vdm_reduced_api_skill_lib
 
 trials: 100
