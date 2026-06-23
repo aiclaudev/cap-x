@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=capx-agent0-full
-#SBATCH --gres=gpu:3
+#SBATCH --gres=gpu:4
 #SBATCH --cpus-per-gpu=14
 #SBATCH --mem=700G
 #SBATCH --time=02:00:00
@@ -10,6 +10,7 @@
 # Full local CaP-Agent0 (no API key):
 #   code  = Qwen/Qwen3-Coder-Next      (vLLM, TP=2, GPUs 0+1)        non-thinking code model
 #   VDM   = Qwen/Qwen3.6-35B-A3B        (vLLM, GPU 2, reasoning-parser qwen3, VLM)
+#   Molmo = allenai/Molmo2-8B          (vLLM, GPU 3, :8122 — point_prompt_molmo backend)
 #   perception = SAM3 + ContactGraspNet + PyRoKi   (shares GPU 2 with the VDM server)
 #   config = cube_stack_multiturn_vdm_reduced_api_skill_lib  (multiturn + VDM + skill-library)
 
@@ -23,7 +24,7 @@ export GIT_PYTHON_REFRESH=quiet
 echo "================ job $SLURM_JOB_ID on $(hostname) ================"
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; nvidia-smi -L || true
 IFS=',' read -ra G <<< "$CUDA_VISIBLE_DEVICES"
-echo "allocated GPUs: ${G[*]}  (coder=${G[0]},${G[1]}  vdm+perc=${G[2]})"
+echo "allocated GPUs: ${G[*]}  (coder=${G[0]},${G[1]}  vdm+perc=${G[2]}  molmo=${G[3]})"
 
 PROBE="$REPO/.venv-vllm/bin/python"
 wait_ready () {  # $1=port $2=name $3=pid
@@ -63,9 +64,25 @@ CODER_PID=$!
 ) > "logs/vdm_${SLURM_JOB_ID}.log" 2>&1 &
 VDM_PID=$!
 
-echo "coder pid $CODER_PID (:8080), vdm pid $VDM_PID (:8081) — waiting for both"
-wait_ready 8080 coder "$CODER_PID" || { kill $CODER_PID $VDM_PID 2>/dev/null; exit 1; }
-wait_ready 8081 vdm   "$VDM_PID"   || { kill $CODER_PID $VDM_PID 2>/dev/null; exit 1; }
+# ---- 2b) Molmo server: allenai/Molmo2-8B (GPU 3, :8122 — point_prompt_molmo backend) ----
+(
+  source "$REPO/.venv-vllm/bin/activate"
+  export CUDA_HOME=/usr/local/cuda; export CPATH="$CUDA_HOME/include${CPATH:+:$CPATH}"   # FlashInfer JIT needs CUDA headers
+  export CUDA_VISIBLE_DEVICES="${G[3]}"
+  exec python -m vllm.entrypoints.openai.api_server \
+      --model allenai/Molmo2-8B --host 127.0.0.1 --port 8122 \
+      --trust-remote-code \
+      --tensor-parallel-size 1 --dtype bfloat16 \
+      --gpu-memory-utilization 0.45 --max-model-len 8192 \
+      --limit-mm-per-prompt '{"image":1}'
+) > "logs/molmo_${SLURM_JOB_ID}.log" 2>&1 &
+MOLMO_PID=$!
+
+echo "coder pid $CODER_PID (:8080), vdm pid $VDM_PID (:8081), molmo pid $MOLMO_PID (:8122) — waiting for all"
+KILL_ALL="kill $CODER_PID $VDM_PID $MOLMO_PID 2>/dev/null"
+wait_ready 8080 coder "$CODER_PID" || { eval "$KILL_ALL"; exit 1; }
+wait_ready 8081 vdm   "$VDM_PID"   || { eval "$KILL_ALL"; exit 1; }
+wait_ready 8122 molmo "$MOLMO_PID" || { eval "$KILL_ALL"; exit 1; }
 
 # ---- 3) eval: code=Coder-Next, VDM=35B-A3B, perception auto-launched by config ----
 source "$REPO/capx_activate.sh"
@@ -83,6 +100,6 @@ python capx/envs/launch.py \
 EVAL_RC=$?
 
 echo "eval exit $EVAL_RC ; shutting down servers"
-kill $CODER_PID $VDM_PID 2>/dev/null || true; wait 2>/dev/null || true
+kill $CODER_PID $VDM_PID $MOLMO_PID 2>/dev/null || true; wait 2>/dev/null || true
 echo "================ DONE (job $SLURM_JOB_ID) ================"
 exit $EVAL_RC
