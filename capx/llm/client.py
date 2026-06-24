@@ -238,6 +238,12 @@ def query_model(args: "LaunchArgs | ModelQueryArgs", prompt: list[dict]) -> str:
             "max_tokens": args.max_tokens,
             "messages": prompt,
         }
+        # Commercial gateways (e.g. letsur) honor reasoning_effort to dial thinking up/down
+        # (low ≈ thinking off for gemini). Only send it to such gateways — local vLLM servers
+        # (e.g. the Qwen VDM on 127.0.0.1) may reject unknown fields.
+        eff = getattr(args, "reasoning_effort", None)
+        if eff and ("letsur" in server_url or "gw." in server_url):
+            payload["reasoning_effort"] = eff
     headers = {"Content-Type": "application/json"}
     if args.api_key:
         headers["Authorization"] = f"Bearer {args.api_key}"
@@ -273,10 +279,25 @@ def query_model(args: "LaunchArgs | ModelQueryArgs", prompt: list[dict]) -> str:
             out["content"] = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as exc:
         raise RuntimeError(f"Unexpected response format: {body}") from exc
-    if body.get("choices") is not None:
-        out["reasoning"] = body.get("choices")[0].get("message").get("reasoning", None)
-    else:
-        out["reasoning"] = None
+    msg = body["choices"][0]["message"] if body.get("choices") else {}
+    reasoning = msg.get("reasoning")
+    if not reasoning:
+        # Some gateways return chain-of-thought as `thinking_blocks` (claude/deepseek expose the
+        # text here). Gemini hides the text — blocks come back empty — but other models don't.
+        tb = msg.get("thinking_blocks") or []
+        parts = [b.get("thinking") or b.get("text") or "" for b in tb if isinstance(b, dict)]
+        reasoning = "\n".join(p for p in parts if p) or None
+    out["reasoning"] = reasoning
+    # Cost / reasoning-effort tracking. Printed to the job log so total spend = sum of [llm_cost]
+    # lines (gateways like letsur return estimated_cost; gemini hides thinking text but reports
+    # reasoning_tokens in usage).
+    usage = body.get("usage") or {}
+    rt = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    cost = body.get("estimated_cost")
+    if cost is not None or rt is not None:
+        amt = cost.get("amount") if isinstance(cost, dict) else cost
+        print(f"[llm_cost] model={args.model} prompt_tok={usage.get('prompt_tokens')} "
+              f"completion_tok={usage.get('completion_tokens')} reasoning_tok={rt} est_cost={amt}")
     return out  # type: ignore[return-value]
 
 
