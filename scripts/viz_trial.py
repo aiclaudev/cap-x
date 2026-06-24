@@ -67,6 +67,8 @@ details[open] summary::before{content:"\\25be "}
 .b-vdm{background:#fff3d6;color:#9a6700}.b-perc{background:#dcf5e3;color:#1a7f37}.b-ctrl{background:#eef1f5;color:#5c6570}
 .tlcard{border:1px solid var(--border);border-radius:9px;margin:9px 0;background:#fff;padding:10px 12px}
 .tlcard.vdm{border-color:var(--orange);background:#fffdf5}
+.summary{background:#fff9ec;border:1px solid #e8d9a8;border-radius:8px;padding:9px 13px;margin:9px 0;font-size:13.5px;line-height:1.65}
+.summary b{color:#9a6700}
 """
 
 
@@ -214,6 +216,13 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
     🖼️ VDM (input image → 묘사) → 📥 Coder 입력 → 📤 Coder 출력 → 🔧 실행 스텝(perception/control) → 🎬 실행결과."""
     vdm_by_turn = vdm_by_turn or {}
     steps_by_turn = steps_by_turn or {}
+    summaries = []
+    sf = tdir / "turn_summaries.json"
+    if sf.exists():
+        try:
+            summaries = json.load(open(sf))
+        except Exception:
+            summaries = []
     parts = []
     for i, r in enumerate(responses):
         dec = r.get("decision", "?")
@@ -278,6 +287,16 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
             out_bits.append('<p class="pin">(빈 코드 — 모델이 코드 없이 응답)</p>')
         parts.append('<details open><summary>📤 Coder 출력 (생성 코드) — 클릭</summary>'
                      '<div class="dbody">' + "".join(out_bits) + '</div></details>')
+
+        # 🧠 auto-generated Korean summary (intent + code diff) for this turn (summarize_turns.py)
+        if i < len(summaries) and isinstance(summaries[i], dict):
+            s = summaries[i]
+            intent = esc(s.get("intent", "")); diff = esc(s.get("diff", ""))
+            if intent or diff:
+                parts.append('<div class="summary">'
+                             + (f'<b>🧠 의도</b> {intent}' if intent else '')
+                             + (f'<br><b>🔀 코드 변경</b> {diff}' if diff else '')
+                             + '</div>')
 
         # 🔧 perception/control steps this turn's code actually executed (SAM3 / Molmo / GraspNet / IK / move)
         tsteps = steps_by_turn.get(turn_key, [])

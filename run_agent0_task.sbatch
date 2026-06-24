@@ -118,6 +118,7 @@ kill $CODER_PID $VDM_PID $MOLMO_PID 2>/dev/null || true; wait 2>/dev/null || tru
 # ---- 4) visualization: per-task report.html + top-level dashboard ----
 if [ -d "$TASK_OUT" ]; then
   echo "generating report.html for $TASK_OUT"
+  python scripts/summarize_turns.py "$TASK_OUT" || echo "!! summarize_turns failed"
   python scripts/viz_trial.py "$TASK_OUT" || echo "!! viz_trial failed"
   echo "generating dashboard index.html for $MODEL_DIR"
   python scripts/viz_index.py "$MODEL_DIR" || echo "!! viz_index failed"
