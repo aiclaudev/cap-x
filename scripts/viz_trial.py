@@ -244,11 +244,17 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
             if in_prompt:
                 card.append(f'<details><summary>📥 VDM 입력 프롬프트 (VLM에 보낸 텍스트 · {len(in_prompt)} chars) — 클릭</summary>'
                             f'<div class="dbody"><pre>{esc(in_prompt[:30000])}</pre></div></details>')
-            # 📥 input image(s): diff sees 2 (previous → current), initial sees 1
+            # 📥 input image(s).
+            #   turn 0  = 초기 장면 묘사: 같은 순간을 여러 카메라(메인 agentview + 손목)로 본 멀티뷰. '이전/현재'가 아님!
+            #   turn>=1 = differencing: 메인 카메라의 '이전 → 현재' 두 프레임.
             if vimgs:
-                caps = (["이전 상태", "현재 상태"] if len(vimgs) >= 2 else ["입력 이미지"])
-                card.append('<div><b>📥 VDM이 본 입력 이미지'
-                            + (f' ({len(vimgs)}장: 이전→현재)' if len(vimgs) >= 2 else '') + '</b></div><div class="imgrid">')
+                if turn_key == 0:
+                    caps = ["메인뷰 (agentview)", "손목뷰 (wrist)", "추가 뷰"]
+                    hdr = (f' ({len(vimgs)}장: 같은 초기 장면의 여러 카메라 뷰)' if len(vimgs) >= 2 else '')
+                else:
+                    caps = (["이전 상태", "현재 상태"] if len(vimgs) >= 2 else ["입력 이미지"])
+                    hdr = (f' ({len(vimgs)}장: 이전→현재)' if len(vimgs) >= 2 else '')
+                card.append('<div><b>📥 VDM이 본 입력 이미지' + hdr + '</b></div><div class="imgrid">')
                 for k, p in enumerate(vimgs):
                     uri = b64_data_uri(p)
                     if uri:
