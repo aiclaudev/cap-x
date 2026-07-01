@@ -22,7 +22,7 @@ TRIALS="${2:-30}"
 WORKERS="${3:-6}"
 MODEL="Qwen/Qwen3-Coder-Next"
 VDM_MODEL="Qwen/Qwen3.6-35B-A3B"
-MODEL_DIR="outputs/${MODEL//\//_}"   # launch.py inserts the model name (/ -> _) under outputs/
+# MODEL_DIR / TASK_OUT are computed after the run (mirror runner._setup_output_dir)
 
 export HF_HOME=/home/nas_main/.cache/huggingface
 unset PYTHONPATH
@@ -98,9 +98,9 @@ export HF_HOME=/home/nas_main/.cache/huggingface
 export CUDA_VISIBLE_DEVICES="${G[2]}"   # robosuite render + SAM3/GraspNet share the VDM GPU
 export MUJOCO_EGL_DEVICE_ID=0
 
-# task output dir = outputs/<model>/<config's output_dir basename>
-OUT_BASE=$(python -c "import yaml,os;print(os.path.basename(yaml.safe_load(open('$CONFIG'))['output_dir']))")
-TASK_OUT="$MODEL_DIR/$OUT_BASE"
+# final output dir mirrors runner._setup_output_dir: outputs/<version>/<model>/<task-leaf>
+TASK_OUT=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG')); v=c.get('version') or 'cap-agent0'; p=c['output_dir'].split('/'); p.insert(-1,'$MODEL'.replace('/','_')); p.insert(-2,v); print('/'.join(p))")
+MODEL_DIR=$(dirname "$TASK_OUT")   # outputs/<version>/<model>
 echo "task output dir: $TASK_OUT"
 
 python capx/envs/launch.py \

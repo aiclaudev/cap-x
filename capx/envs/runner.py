@@ -102,14 +102,16 @@ def _stop_api_servers(server_procs: list) -> None:
 def _setup_output_dir(args, config: dict[str, Any]) -> None:
     """Create and normalize the output directory path.
 
-    Inserts the model name into the output path so that results from
-    different models are stored separately.
+    Inserts the agent-framework version and model name into the output path so results are
+    grouped as outputs/<version>/<model>/<task>/ (version defaults to 'cap-agent0').
     """
     if args.use_oracle_code:
         args.model = "oracle"
     if config["output_dir"]:
+        version = config.get("version") or "cap-agent0"
         parts = config["output_dir"].split("/")
-        parts.insert(-1, str(args.model).replace("/", "_"))
+        parts.insert(-1, str(args.model).replace("/", "_"))  # model right before the task leaf
+        parts.insert(-2, version)                             # version right before the model
         new_out_dir = "/".join(parts)
         Path(new_out_dir).mkdir(parents=True, exist_ok=True)
         config["output_dir"] = new_out_dir

@@ -38,6 +38,7 @@ from capx.utils.launch_utils import (
     TrialSummary,
     _build_multi_turn_decision_prompt,
     _build_multi_turn_decision_prompt_legacy,
+    _build_reflection_codegen_prompt,
     _extract_code,
     _get_visual_feedback,
     _parse_multi_turn_decision,
@@ -248,6 +249,7 @@ def _capture_initial_visual_feedback(
         (config["use_visual_feedback"] and args.model in VLM_MODELS)
         or (config["use_img_differencing"] and visual_differencing_args.model in VLM_MODELS)
         or config.get("use_video_differencing", False)
+        or config.get("use_reflector", False)  # agentv1: Reflector needs task_description populated
     )
     if not (needs_visual and hasattr(env, "render")):
         return visual_feedback_imgs, visual_feedback_base64_history, task_description
@@ -261,7 +263,7 @@ def _capture_initial_visual_feedback(
     # is set, hand the VDM just the task goal so it produces a scene description instead.
     task_description = (
         _extract_task_goal(_full_task_text)
-        if config.get("vdm_goal_only", False)
+        if config.get("vdm_goal_only", False) or config.get("use_reflector", False)
         else _full_task_text
     )
 
@@ -298,8 +300,15 @@ def _capture_initial_visual_feedback(
                 {"type": "image_url", "image_url": {"url": initial_wrist_base64}}
             )
 
-    # Image differencing: ask a VLM to describe the initial scene
-    if config["use_img_differencing"] or config.get("use_video_differencing", False):
+    # Initial-scene description: ask a VLM to describe the starting state so the FIRST code
+    # generation isn't blind. This is generic image→text (no code/video yet), so agentv1 and
+    # cap-agent0 use the SAME path/model here (visual_differencing_model). Only the multi-turn
+    # Reflector loop uses the reflector model.
+    if (
+        config["use_img_differencing"]
+        or config.get("use_video_differencing", False)
+        or config.get("use_reflector", False)
+    ):
         description = _describe_initial_scene(
             visual_differencing_args, task_description, initial_base64,
             wrist_image_base64=initial_wrist_base64,
@@ -341,6 +350,34 @@ def _log_vdm_io(tool: str, prompt: list[dict[str, Any]], output: str, images: li
         from capx.utils.execution_logger import log_step as _log
         _log(tool, f"[VDM 입력 프롬프트]\n{_vdm_prompt_to_text(prompt)}\n\n[VDM 출력]\n{output}",
              images=[im for im in images if im])
+    except Exception:
+        pass
+
+
+def _log_reflector_io(
+    task_description: str,
+    executed_code: str,
+    stdout: str,
+    stderr: str,
+    frames: list[np.ndarray],
+    output: str,
+    turn_tag: str,
+) -> None:
+    """Record one Reflector call (code + video input → reflection + verdict) for the viz tool."""
+    try:
+        from capx.utils.execution_logger import log_step as _log
+        input_text = (
+            f"[Task goal]\n{task_description}\n\n"
+            f"[실행한 코드]\n{executed_code}\n\n"
+            f"[stdout]\n{stdout or '(empty)'}\n\n"
+            f"[stderr]\n{stderr or '(empty)'}\n\n"
+            f"[메인 카메라 영상: {len(frames)} 프레임을 {REFLECTOR_ENCODE_FPS}fps mp4로 전송 → gemini가 "
+            f"저해상도로 실동작 ~{REFLECTOR_TARGET_FPS}fps 샘플 — 아래는 report 표시용 첫/마지막 프레임]"
+        )
+        imgs = [frames[0], frames[-1]] if len(frames) > 1 else list(frames[:1])
+        _log(f"Reflector[{turn_tag}] · 코드+영상 반성 (입력 → 출력)",
+             f"[Reflector 입력]\n{input_text}\n\n[Reflector 출력]\n{output}",
+             images=imgs)
     except Exception:
         pass
 
@@ -528,6 +565,131 @@ def _get_video_differencing_feedback(
 
 
 # ---------------------------------------------------------------------------
+# agentv1 Reflector
+# ---------------------------------------------------------------------------
+
+REFLECTOR_SYSTEM_PROMPT = (
+    "You are a Reflector agent for a robot-manipulation coding agent. You are given the task "
+    "goal, the Python code that was just executed, its console output, and a video of the robot "
+    "executing that code. Your job is to REFLECT on what happened: what the code was trying to do, "
+    "what actually happened in the video, what went wrong or is incomplete, and concrete, specific "
+    "guidance on what the code-generation agent should change next. "
+    "The environment is NOT reset between turns — the executed code's effects persist, and the next "
+    "code will continue from the CURRENT state (the state shown at the end of the video). Frame your "
+    "guidance as what to do NEXT from this current state; do not tell it to redo steps that already succeeded. "
+    "You do NOT write code — describe fixes in words, never Python. "
+    "End your response with a verdict line, exactly one of:\n"
+    "VERDICT: FINISH   (the task is fully and correctly completed)\n"
+    "VERDICT: CONTINUE (more work is needed — your reflection above tells the next agent what to fix)"
+)
+
+# The Reflector sends the turn's execution as a VIDEO (mp4 base64 via image_url). letsur/gemini
+# processes it (verified functionally: gemini reads objects + motion), tokenizing each sampled
+# frame at LOW resolution (~65 tok/frame, measured; vs ~1089 for a full still image).
+#
+# HOW WE HIT ~5 fps: letsur ignores `video_metadata.fps`, and gemini re-samples the mp4 at ~1
+# frame per second of the clip's DURATION (measured: mp4 of D seconds → ~D frames seen). So to make
+# gemini sample the REAL motion at 5 fps, we stretch the timeline by encoding at capture/target fps:
+#   encode_fps = SIM_CAPTURE_FPS / REFLECTOR_TARGET_FPS  (= 20/5 = 4)
+# → an N-frame turn (N/20 s real) becomes an N/4 s mp4 → gemini sees ~N/4 frames = 5 per real second.
+REFLECTOR_TARGET_FPS = 5      # frames per REAL second we want gemini to sample
+SIM_CAPTURE_FPS = 20         # robosuite/libero control_freq (frames rendered per real second)
+REFLECTOR_ENCODE_FPS = max(1, round(SIM_CAPTURE_FPS / REFLECTOR_TARGET_FPS))  # = 4
+
+
+def _parse_reflection(content: str) -> tuple[str, str]:
+    """Parse the Reflector's response into (verdict, reflection_text).
+
+    verdict is "finish" or "continue" (defaults to "continue" if no explicit verdict is found,
+    so the loop keeps going rather than stopping prematurely). The verdict line is stripped from
+    the returned reflection text.
+    """
+    if not content:
+        return "continue", ""
+    verdict = "continue"
+    lines = content.splitlines()
+    kept: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("VERDICT:"):
+            payload = stripped.split(":", 1)[1].strip().upper()
+            verdict = "finish" if payload.startswith("FINISH") else "continue"
+            continue  # drop the verdict line from the reflection text
+        kept.append(line)
+    return verdict, "\n".join(kept).strip()
+
+
+def _get_reflection(
+    reflector_args: ModelQueryArgs,
+    task_description: str,
+    executed_code: str,
+    turn_frames: list[np.ndarray],
+    stdout: str,
+    stderr: str,
+    wrist_turn_frames: list[np.ndarray] | None = None,
+    turn_tag: str = "",
+) -> dict[str, str] | None:
+    """agentv1 Reflector: review executed code + execution video and reflect on what to fix.
+
+    The Reflector does not generate code. It returns a reflection (guidance for the next
+    code-generation turn) and a FINISH/CONTINUE verdict for whether the trial should stop.
+
+    Args:
+        reflector_args: Model query args for the Reflector model (must be a VLM — takes video).
+        task_description: The task goal.
+        executed_code: The code executed so far this trial (for context).
+        turn_frames: RGB frames from the main camera for the turn just executed.
+        stdout: Console stdout from the executed code.
+        stderr: Console stderr from the executed code.
+        wrist_turn_frames: Optional wrist-camera frames for the same turn.
+
+    Returns:
+        {"verdict": "finish"|"continue", "reflection": str, "raw": str}, or None if no frames.
+    """
+    if not turn_frames:
+        return None
+
+    video_base64 = _encode_video_base64(turn_frames, fps=REFLECTOR_ENCODE_FPS)  # → gemini ~5fps of real motion
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": f"Task goal:\n{task_description}"},
+        {"type": "text", "text": "The Python code just executed in the environment was:"},
+        {"type": "text", "text": f"```python\n{executed_code}\n```"},
+        {"type": "text", "text": f"Console stdout:\n{stdout or '(empty)'}"},
+        {"type": "text", "text": f"Console stderr:\n{stderr or '(empty)'}"},
+        {
+            "type": "text",
+            "text": (
+                "The following video shows the robot executing that code from the main camera view. "
+                "Reflect on what happened and what to fix next."
+            ),
+        },
+        {"type": "image_url", "image_url": {"url": video_base64}},
+    ]
+
+    if wrist_turn_frames:
+        wrist_video_base64 = _encode_video_base64(wrist_turn_frames, fps=REFLECTOR_ENCODE_FPS)
+        user_content.extend([
+            {
+                "type": "text",
+                "text": (
+                    "The following video shows the same execution from the robot's wrist-mounted "
+                    "(eye-in-hand) camera, a close-up of the gripper and manipulated objects."
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": wrist_video_base64}},
+        ])
+
+    prompt = [
+        {"role": "system", "content": REFLECTOR_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    raw = _query_model(reflector_args, prompt)["content"]
+    verdict, reflection = _parse_reflection(raw)
+    _log_reflector_io(task_description, executed_code, stdout, stderr, turn_frames, raw or "", turn_tag)
+    return {"verdict": verdict, "reflection": reflection, "raw": raw or ""}
+
+
+# ---------------------------------------------------------------------------
 # Initial code generation
 # ---------------------------------------------------------------------------
 
@@ -584,6 +746,7 @@ def _handle_multi_turn_step(
     turn_frames: list[np.ndarray] | None = None,
     wrist_turn_frames: list[np.ndarray] | None = None,
     wrist_base64_history: list[str] | None = None,
+    reflector_args: ModelQueryArgs | None = None,
 ) -> tuple[str, str | None, str | None, dict | None, list | None]:
     """Execute one multi-turn decision step.
 
@@ -611,6 +774,35 @@ def _handle_multi_turn_step(
 
     if info_step["stderr"] != "":
         stderr_history.append(info_step["stderr"])
+
+    # --- agentv1 Reflector path ---
+    # Reflect on the executed code + execution video, decide FINISH/CONTINUE, and on CONTINUE
+    # generate corrected code from the reflection. This replaces the VDM decision path.
+    if config.get("use_reflector"):
+        reflection_out = _get_reflection(
+            reflector_args if reflector_args is not None else visual_differencing_args,
+            task_description,
+            executed_code,
+            turn_frames or [],
+            info_step["stdout"],
+            info_step["stderr"],
+            wrist_turn_frames,
+            turn_tag=f"turn{code_block_idx}",
+        )
+        if reflection_out is None:
+            # No frames captured this turn — cannot reflect; proceed without regenerating.
+            return "continue", None, None, None, None
+        reflection = reflection_out["reflection"]
+        if reflection_out["verdict"] == "finish":
+            print("Reflector chose to finish")
+            return "finish", None, reflection, None, None
+        # CONTINUE: hand the reflection to the code-generation agent (pure code gen, no decision).
+        codegen_prompt = _build_reflection_codegen_prompt(obs, complete_multi_turn_prompt, reflection)
+        content = _query_model(args, codegen_prompt)
+        combined_reasoning = f"[REFLECTION]\n{reflection}"
+        if content.get("reasoning"):
+            combined_reasoning += f"\n\n[CODEGEN REASONING]\n{content['reasoning']}"
+        return "regenerate", content["content"], combined_reasoning, None, codegen_prompt
 
     # Capture visual feedback if applicable
     visual_feedback_base64 = None
@@ -726,6 +918,7 @@ def _run_single_trial(
 
     use_video_diff = config.get("use_video_differencing", False)
     use_wrist = config.get("use_wrist_camera", False)
+    use_reflector = config.get("use_reflector", False)  # agentv1: needs per-turn video frames
 
     # --- 1. Reset environment ---
     obs, _ = env.reset(options={"trial": trial}, seed=trial)
@@ -740,8 +933,8 @@ def _run_single_trial(
 
     if config["record_video"] and hasattr(env, "enable_video_capture"):
         env.enable_video_capture(True, clear=True, wrist_camera=use_wrist)
-    elif use_video_diff and hasattr(env, "enable_video_capture"):
-        # Video differencing needs frame recording even without record_video
+    elif (use_video_diff or use_reflector) and hasattr(env, "enable_video_capture"):
+        # Video differencing and the agentv1 Reflector need frame recording even without record_video
         env.enable_video_capture(True, clear=True, wrist_camera=use_wrist)
 
     # --- Shared trial state ---
@@ -774,9 +967,28 @@ def _run_single_trial(
         debug=args.debug,
     )
 
-    if config["use_img_differencing"] or use_video_diff:
+    if config["use_img_differencing"] or use_video_diff or use_reflector:
         assert visual_differencing_args.model in VLM_MODELS, (
-            "Image/video differencing model must be in the list of VLM models"
+            "Image/video differencing model (also used for agentv1's initial-scene "
+            "description) must be in the list of VLM models"
+        )
+
+    # agentv1: build the Reflector's query args. Reuses the visual-differencing endpoint
+    # (server_url / api_key) but the model defaults to visual_differencing_model unless
+    # reflector_model is set. Must be a VLM — it consumes the per-turn execution video.
+    reflector_args: ModelQueryArgs | None = None
+    if use_reflector:
+        reflector_args = ModelQueryArgs(
+            model=config.get("reflector_model") or args.visual_differencing_model,
+            server_url=args.visual_differencing_model_server_url,
+            api_key=args.visual_differencing_model_api_key,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            reasoning_effort=args.reasoning_effort,
+            debug=args.debug,
+        )
+        assert reflector_args.model in VLM_MODELS, (
+            "agentv1 Reflector model must be a VLM (it consumes execution video)"
         )
 
     # --- 2. Capture initial visual feedback ---
@@ -852,7 +1064,7 @@ def _run_single_trial(
 
     # Track whether we're recording frames (for video diff or record_video)
     recording_frames = (
-        (config["record_video"] or use_video_diff)
+        (config["record_video"] or use_video_diff or use_reflector)
         and hasattr(env, "get_video_frame_count")
     )
 
@@ -888,7 +1100,7 @@ def _run_single_trial(
             # Get turn frames for video differencing
             turn_frames = None
             wrist_turn_frames = None
-            if use_video_diff and recording_frames:
+            if (use_video_diff or use_reflector) and recording_frames:
                 turn_frames = env.get_video_frames_range(frame_start, frame_end)
                 if use_wrist and hasattr(env, "get_wrist_video_frames_range"):
                     wrist_turn_frames = env.get_wrist_video_frames_range(
@@ -903,6 +1115,7 @@ def _run_single_trial(
                 turn_frames=turn_frames,
                 wrist_turn_frames=wrist_turn_frames,
                 wrist_base64_history=wrist_base64_history,
+                reflector_args=reflector_args,
             )
 
             if mt_ensemble is not None:

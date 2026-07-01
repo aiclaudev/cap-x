@@ -33,6 +33,7 @@ VLM_MODELS = [
     "Qwen/Qwen2.5-VL-7B-Instruct",   # local open VLM served via vLLM (used for VDM / visual feedback)
     "Qwen/Qwen3.6-35B-A3B",          # local open VLM (Qwen3_5_moe, vision) — VDM model
     "google/gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview",         # letsur gateway bare name (same model, no provider prefix)
     "google/gemini-2.5-flash-lite",
     "anthropic/claude-opus-4-5",
     "anthropic/claude-haiku-4-5",
