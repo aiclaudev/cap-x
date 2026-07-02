@@ -24,6 +24,7 @@ TRIALS="${2:-1}"
 WORKERS="${3:-1}"
 CODE_MODEL="${4:-gemini-3.1-pro-preview}"   # letsur bare name (overrides config's google/... for the gateway)
 REASONING="${5:-low}"
+RESUME_IDX="${6:-}"   # optional 1-based start index; appends trials range(RESUME_IDX, TRIALS+1) without overwriting
 LETSUR_URL="https://gw.letsur.ai/v1/chat/completions"
 KEYFILE="/home/nas_main/dohyunlee/agentic-robotics-dev/.letsurkey"   # parent repo root (same as run_letsur)
 [ -s "$KEYFILE" ] || { echo "!! missing/empty $KEYFILE — provide the letsur key first"; exit 2; }
@@ -78,6 +79,10 @@ TASK_OUT=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG')); v=c.get('v
 MODEL_DIR=$(dirname "$TASK_OUT")   # outputs/<version>/<model>
 echo "task output dir: $TASK_OUT"
 
+RESUME_ARG=()
+[ -n "$RESUME_IDX" ] && RESUME_ARG=(--resume-idx "$RESUME_IDX")
+echo "RESUME_IDX=${RESUME_IDX:-<none>}  (trials range: ${RESUME_IDX:-1}..$TRIALS)"
+
 python capx/envs/launch.py \
     --config-path "$CONFIG" \
     --model "$CODE_MODEL" \
@@ -88,6 +93,7 @@ python capx/envs/launch.py \
     --visual-differencing-model-server-url "$LETSUR_URL" \
     --visual-differencing-model-api-key "$LETSUR_KEY" \
     --reasoning-effort "$REASONING" \
+    "${RESUME_ARG[@]}" \
     --total-trials "$TRIALS" --num-workers "$WORKERS" --max-tokens 16384
 EVAL_RC=$?
 

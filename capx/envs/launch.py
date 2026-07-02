@@ -94,6 +94,10 @@ class LaunchArgs:
     total_trials: int | None = None
     """Total number of trials to run. Overrides the value in the YAML config."""
 
+    resume_idx: int | None = None
+    """1-based trial index to start from (inclusive); runs range(resume_idx, total_trials+1). Use to
+    append fresh trials without overwriting existing ones (e.g. resume_idx=31, total_trials=48 → 31..48)."""
+
     num_workers: int | None = None
     """Number of parallel worker processes to use. Overrides the value in the YAML config."""
 

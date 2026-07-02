@@ -366,15 +366,21 @@ def _log_reflector_io(
     """Record one Reflector call (code + video input → reflection + verdict) for the viz tool."""
     try:
         from capx.utils.execution_logger import log_step as _log
+        if frames:
+            video_note = (
+                f"[메인 카메라 영상: {len(frames)} 프레임을 {REFLECTOR_ENCODE_FPS}fps mp4로 전송 → gemini가 "
+                f"저해상도로 실동작 ~{REFLECTOR_TARGET_FPS}fps 샘플 — 아래는 report 표시용 첫/마지막 프레임]"
+            )
+        else:
+            video_note = "[영상 없음: 시뮬레이터 전진 전 코드 에러(또는 무동작) — 코드+stdout/stderr만으로 반성]"
         input_text = (
             f"[Task goal]\n{task_description}\n\n"
             f"[실행한 코드]\n{executed_code}\n\n"
             f"[stdout]\n{stdout or '(empty)'}\n\n"
             f"[stderr]\n{stderr or '(empty)'}\n\n"
-            f"[메인 카메라 영상: {len(frames)} 프레임을 {REFLECTOR_ENCODE_FPS}fps mp4로 전송 → gemini가 "
-            f"저해상도로 실동작 ~{REFLECTOR_TARGET_FPS}fps 샘플 — 아래는 report 표시용 첫/마지막 프레임]"
+            f"{video_note}"
         )
-        imgs = [frames[0], frames[-1]] if len(frames) > 1 else list(frames[:1])
+        imgs = ([frames[0], frames[-1]] if len(frames) > 1 else list(frames[:1])) if frames else []
         _log(f"Reflector[{turn_tag}] · 코드+영상 반성 (입력 → 출력)",
              f"[Reflector 입력]\n{input_text}\n\n[Reflector 출력]\n{output}",
              images=imgs)
@@ -644,29 +650,48 @@ def _get_reflection(
         wrist_turn_frames: Optional wrist-camera frames for the same turn.
 
     Returns:
-        {"verdict": "finish"|"continue", "reflection": str, "raw": str}, or None if no frames.
+        {"verdict": "finish"|"continue", "reflection": str, "raw": str}. When no video frames
+        were captured (code crashed / no motion before the sim advanced), still reflects on the
+        code + stdout/stderr alone rather than returning None, so pure-code crashes get retried.
     """
-    if not turn_frames:
-        return None
+    # A turn produces NO video frames when the code crashes (or does no motion) BEFORE the
+    # simulator advances — e.g. perception/IK returns None and raises during planning. Do NOT
+    # skip the Reflector in that case (skipping silently ends the trial with no corrective turn);
+    # reflect on the code + stdout/stderr traceback alone so pure-code crashes still get retried.
+    has_video = bool(turn_frames)
 
-    video_base64 = _encode_video_base64(turn_frames, fps=REFLECTOR_ENCODE_FPS)  # → gemini ~5fps of real motion
     user_content: list[dict[str, Any]] = [
         {"type": "text", "text": f"Task goal:\n{task_description}"},
         {"type": "text", "text": "The Python code just executed in the environment was:"},
         {"type": "text", "text": f"```python\n{executed_code}\n```"},
         {"type": "text", "text": f"Console stdout:\n{stdout or '(empty)'}"},
         {"type": "text", "text": f"Console stderr:\n{stderr or '(empty)'}"},
-        {
-            "type": "text",
-            "text": (
-                "The following video shows the robot executing that code from the main camera view. "
-                "Reflect on what happened and what to fix next."
-            ),
-        },
-        {"type": "image_url", "image_url": {"url": video_base64}},
     ]
 
-    if wrist_turn_frames:
+    if has_video:
+        video_base64 = _encode_video_base64(turn_frames, fps=REFLECTOR_ENCODE_FPS)  # → gemini ~5fps of real motion
+        user_content.extend([
+            {
+                "type": "text",
+                "text": (
+                    "The following video shows the robot executing that code from the main camera view. "
+                    "Reflect on what happened and what to fix next."
+                ),
+            },
+            {"type": "image_url", "image_url": {"url": video_base64}},
+        ])
+    else:
+        user_content.append({
+            "type": "text",
+            "text": (
+                "No execution video is available for this turn: the code raised an error (or performed "
+                "no robot motion) before the simulator advanced, so nothing was rendered. Reflect on the "
+                "code and the console output/traceback above and give concrete, specific guidance on what "
+                "to fix in the next code (e.g. which API call returned None, what to check before using it)."
+            ),
+        })
+
+    if has_video and wrist_turn_frames:
         wrist_video_base64 = _encode_video_base64(wrist_turn_frames, fps=REFLECTOR_ENCODE_FPS)
         user_content.extend([
             {
@@ -790,7 +815,8 @@ def _handle_multi_turn_step(
             turn_tag=f"turn{code_block_idx}",
         )
         if reflection_out is None:
-            # No frames captured this turn — cannot reflect; proceed without regenerating.
+            # Reflector could not run at all (should be rare — it now reflects on code+stderr even
+            # with no video). Proceed without regenerating rather than ending the trial.
             return "continue", None, None, None, None
         reflection = reflection_out["reflection"]
         if reflection_out["verdict"] == "finish":
