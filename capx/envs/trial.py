@@ -840,10 +840,11 @@ def _handle_multi_turn_step(
         # CONTINUE: hand the reflection to the code-generation agent (pure code gen, no decision).
         codegen_prompt = _build_reflection_codegen_prompt(obs, complete_multi_turn_prompt, reflection)
         content = _query_model(args, codegen_prompt)
-        combined_reasoning = f"[REFLECTION]\n{reflection}"
-        if content.get("reasoning"):
-            combined_reasoning += f"\n\n[CODEGEN REASONING]\n{content['reasoning']}"
-        return "regenerate", content["content"], combined_reasoning, None, codegen_prompt
+        # The CodeGen agent only writes code; its "reasoning" (if any) is its own think trace.
+        # Do NOT prepend the reflection here — it's already shown in the Coder input + Reflector
+        # cards, so prepending it made the Coder-output card falsely look like the coder reflected.
+        codegen_reasoning = content.get("reasoning") or "(CodeGen은 순수 코드 생성 — 반성은 입력/Reflector 카드 참조)"
+        return "regenerate", content["content"], codegen_reasoning, None, codegen_prompt
 
     # Capture visual feedback if applicable
     visual_feedback_base64 = None
