@@ -108,6 +108,13 @@ def _load_config(args: LaunchArgs) -> tuple[Any, dict[str, Any], list]:
         "visual_differencing_model": "google/gemini-3.1-pro-preview",
         "visual_differencing_model_server_url": "http://127.0.0.1:8110/chat/completions",
         "visual_differencing_model_api_key": None,
+        # Let a config set the code model + reasoning effort (agentv1 pins these via its YAML);
+        # CLI still wins (only applied when the arg is still at its CLI default).
+        # NOTE: these values are SENTINELS for "CLI not overridden" — they must match
+        # LaunchArgs' field defaults (model=gemini, reasoning_effort=medium), NOT a desired value.
+        # The desired low is supplied by the agentv1 config's `reasoning_effort: low`.
+        "model": "google/gemini-3.1-pro-preview",
+        "reasoning_effort": "medium",
     }
     for field, cli_default in _CLI_DEFAULTS.items():
         current_value = getattr(args, field, cli_default)
@@ -131,7 +138,9 @@ def _load_config(args: LaunchArgs) -> tuple[Any, dict[str, Any], list]:
         "use_oracle_code": args.use_oracle_code
         if args.use_oracle_code is not None
         else configs_dict.get("use_oracle_code", False),
-        "resume_idx": configs_dict.get("resume_idx", None),
+        "resume_idx": args.resume_idx
+        if getattr(args, "resume_idx", None) is not None
+        else configs_dict.get("resume_idx", None),
         "use_visual_feedback": args.use_visual_feedback
         if args.use_visual_feedback is not None
         else configs_dict.get("use_visual_feedback", False),
@@ -160,6 +169,19 @@ def _load_config(args: LaunchArgs) -> tuple[Any, dict[str, Any], list]:
         # Feed only the task goal (not the full code-gen prompt + API reference) to the VDM,
         # so a code-capable VLM describes the scene instead of emitting code. Opt-in; off = original.
         "vdm_goal_only": configs_dict.get("vdm_goal_only", False),
+        # agentv1 Reflector: replace VDM with a Reflector agent that reviews the executed code +
+        # execution video, reflects on what to fix, and judges FINISH/CONTINUE (no code generation).
+        "use_reflector": args.use_reflector
+        if getattr(args, "use_reflector", None) is not None
+        else configs_dict.get("use_reflector", False),
+        "reflector_model": getattr(args, "reflector_model", None)
+        if getattr(args, "reflector_model", None) is not None
+        else configs_dict.get("reflector_model", None),
+        # Agent-framework version folder for outputs: outputs/<version>/<model>/<task>/.
+        # Defaults to cap-agent0; agentv1 configs set version: agentv1.
+        "version": args.version
+        if getattr(args, "version", None) is not None
+        else configs_dict.get("version", "cap-agent0"),
     }
 
     return env_factory, merged_config, api_servers
@@ -308,6 +330,60 @@ def _build_multi_turn_decision_prompt(
     # collapse the last message
     multi_turn_decision_prompt[-1]["content"] = collapse_text_image_inputs(multi_turn_decision_prompt[-1]["content"])
     return multi_turn_decision_prompt
+
+
+def _build_reflection_codegen_prompt(
+    obs: dict[str, np.ndarray],
+    complete_multi_turn_prompt: str,
+    reflection: str,
+    visual_feedback: str | None = None,
+) -> list[dict]:
+    """agentv1: build the code-generation prompt that consumes the Reflector's reflection.
+
+    Unlike ``_build_multi_turn_decision_prompt``, this does NOT ask the model to decide
+    FINISH/REGENERATE — the Reflector already decided CONTINUE. The code-gen agent's sole job
+    is to emit corrected Python code, guided by the reflection.
+
+    Args:
+        obs: The observation (carries ``full_prompt``: task + API reference).
+        complete_multi_turn_prompt: The formatted multi-turn prompt (executed code + stdout/stderr).
+        reflection: The Reflector's reflection on what to fix this turn.
+        visual_feedback: Optional base64 image of the current state.
+
+    Returns:
+        The code-generation prompt as a list of message dicts.
+    """
+    codegen_prompt = copy.deepcopy(obs["full_prompt"])
+    codegen_prompt[-1]["content"].append(
+        {"type": "text", "text": complete_multi_turn_prompt}
+    )
+    if visual_feedback is not None:
+        codegen_prompt[-1]["content"].append(
+            {
+                "type": "text",
+                "text": "Included below is an image of the current state of the environment (after the code above was executed).",
+            }
+        )
+        codegen_prompt[-1]["content"].append(
+            {"type": "image_url", "image_url": {"url": visual_feedback}}
+        )
+    codegen_prompt[-1]["content"].append(
+        {
+            "type": "text",
+            "text": (
+                "A separate reflection agent reviewed the code you just executed together with a "
+                "video of its execution. Its reflection on what went wrong and what to fix next is:\n"
+                f"---\n{reflection}\n---\n"
+                "The environment state persists from the code you already ran — this new code runs "
+                "from the CURRENT state, not a reset, so continue from where execution left off. "
+                "Using this reflection, write the corrected Python code for the next step. "
+                "Output ONLY the executable Python code in a single fenced code block (```python ... ```). "
+                "Do not repeat already-successful steps unless the reflection says to redo them."
+            ),
+        }
+    )
+    codegen_prompt[-1]["content"] = collapse_text_image_inputs(codegen_prompt[-1]["content"])
+    return codegen_prompt
 
 
 def _parse_multi_turn_decision(content: str) -> tuple[str, str | None]:

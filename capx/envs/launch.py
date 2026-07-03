@@ -94,6 +94,10 @@ class LaunchArgs:
     total_trials: int | None = None
     """Total number of trials to run. Overrides the value in the YAML config."""
 
+    resume_idx: int | None = None
+    """1-based trial index to start from (inclusive); runs range(resume_idx, total_trials+1). Use to
+    append fresh trials without overwriting existing ones (e.g. resume_idx=31, total_trials=48 → 31..48)."""
+
     num_workers: int | None = None
     """Number of parallel worker processes to use. Overrides the value in the YAML config."""
 
@@ -102,6 +106,10 @@ class LaunchArgs:
 
     output_dir: str | None = None
     """Directory to save trial outputs (code, logs, videos)."""
+
+    version: str | None = None
+    """Agent-framework version folder for outputs, e.g. 'agentv1' or 'cap-agent0'. Inserted into the
+    output path as outputs/<version>/<model>/<task>/. Defaults to 'cap-agent0' when unset."""
 
     debug: bool | None = False
     """Enable debug logging (prints full model responses)."""
@@ -114,6 +122,16 @@ class LaunchArgs:
 
     use_multimodel: bool | None = None
     """Whether to use multimodel for parallel ensembling."""
+
+    # agentv1 Reflector configuration
+    use_reflector: bool | None = None
+    """agentv1: use a Reflector agent instead of VDM. The Reflector reviews the executed code +
+    execution video, reflects on what to fix, and judges FINISH/CONTINUE. It does NOT write code;
+    its reflection is fed into the next turn's code-generation agent."""
+
+    reflector_model: str | None = None
+    """Model for the Reflector agent (must be a VLM — it consumes execution video). Defaults to
+    visual_differencing_model when unset; reuses visual_differencing_model_server_url / _api_key."""
 
     # Web UI configuration
     web_ui: bool | None = None

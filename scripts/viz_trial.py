@@ -166,8 +166,13 @@ def load_vdm_by_turn(perc_dir: Path | None) -> dict:
 
 
 def load_steps_by_turn(perc_dir: Path | None) -> dict:
-    """Segment non-VDM execution steps by turn. The VDM[turnN] marker precedes turn N's code run,
-    so every perception/control step after it (until the next VDM marker) belongs to turn N."""
+    """Segment execution steps by turn (all steps land in one history block, so we segment by markers).
+
+    Two segmentation markers, both handled:
+      • cap-agent0 (VDM): a ``VDM[turnN]`` step PRECEDES turn N's code run → set current turn = N.
+      • agentv1 (Reflector): a ``Reflector[..]`` step runs AFTER the current turn's execution → it
+        belongs to the current turn, and the NEXT steps belong to the next turn (advance after it).
+    """
     out: dict[int, list] = {}
     if not (perc_dir and perc_dir.exists()):
         return out
@@ -187,6 +192,8 @@ def load_steps_by_turn(perc_dir: Path | None) -> dict:
             si = s.get("step_index")
             imgs = _step_images(perc_dir, blk, si, s.get("num_images"))
             out.setdefault(cur, []).append((tool, (s.get("text", "") or "").strip(), si, imgs))
+            if tool.startswith("Reflector"):
+                cur += 1  # reflector closes this turn; subsequent steps belong to the next turn
     return out
 
 
@@ -280,19 +287,26 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
         if inp.strip():
             parts.append(f'<details><summary>📥 Coder 입력 프롬프트 ({src} · {len(inp)} chars) — 클릭</summary>'
                          f'<div class="dbody"><pre>{esc(inp[:40000])}</pre></div></details>')
-        elif dec in ("regenerate", "finish"):
+        elif dec == "regenerate":
             parts.append('<p class="pin">📥 Coder 입력: 저장 안 됨 — <code>save_multiturn_prompts: true</code>로 재실행 필요</p>')
 
-        # 📤 Coder OUTPUT (generated code [+ reasoning if any])
-        out_bits = []
-        if reasoning.strip():
-            out_bits.append(f'<div class="reasoning"><b>reasoning:</b><br>{esc(reasoning[:4000])}</div>')
-        if code.strip():
-            out_bits.append(f'<pre>{esc(code)}</pre>')
+        # 📤 OUTPUT — a FINISH turn has NO coder call: the text is the decision-maker's reasoning
+        # (agentv1: Reflector; cap-agent0: the code model). Only initial/regenerate produce code.
+        if dec == "finish":
+            body = (f'<div class="reasoning">{esc(reasoning[:4000])}</div>'
+                    if reasoning.strip() else '<p class="pin">(판단 근거 텍스트 없음)</p>')
+            parts.append('<details open><summary>📤 완료 판단 (FINISH) 근거 — agentv1: Reflector / cap-agent0: 코드 모델 (coder 아님)</summary>'
+                         '<div class="dbody">' + body + '</div></details>')
         else:
-            out_bits.append('<p class="pin">(빈 코드 — 모델이 코드 없이 응답)</p>')
-        parts.append('<details open><summary>📤 Coder 출력 (생성 코드) — 클릭</summary>'
-                     '<div class="dbody">' + "".join(out_bits) + '</div></details>')
+            out_bits = []
+            if reasoning.strip():
+                out_bits.append(f'<div class="reasoning"><b>reasoning:</b><br>{esc(reasoning[:4000])}</div>')
+            if code.strip():
+                out_bits.append(f'<pre>{esc(code)}</pre>')
+            else:
+                out_bits.append('<p class="pin">(빈 코드 — 모델이 코드 없이 응답)</p>')
+            parts.append('<details open><summary>📤 Coder 출력 (생성 코드) — 클릭</summary>'
+                         '<div class="dbody">' + "".join(out_bits) + '</div></details>')
 
         # 🧠 auto-generated Korean summary (intent + code diff) for this turn (summarize_turns.py)
         if i < len(summaries) and isinstance(summaries[i], dict):
@@ -304,11 +318,14 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
                              + (f'<br><b>🔀 코드 변경</b> {diff}' if diff else '')
                              + '</div>')
 
-        # 🔧 perception/control steps this turn's code actually executed (SAM3 / Molmo / GraspNet / IK / move)
-        tsteps = steps_by_turn.get(turn_key, [])
-        if tsteps:
-            inner = "".join(_render_one_step(t, tx, si, im) for (t, tx, si, im) in tsteps)
-            parts.append(f'<details open><summary>🔧 이 턴의 실행 스텝 ({len(tsteps)}개 — SAM3/Molmo/GraspNet 결과 이미지 + IK/move) — 클릭</summary>'
+        # 🔧 perception/control steps this turn's code executed. The Reflector I/O is also logged as a
+        # step here — pull it OUT so it renders as its own stage AFTER the video (correct causal order).
+        all_tsteps = steps_by_turn.get(turn_key, [])
+        reflector_steps = [x for x in all_tsteps if str(x[0]).startswith("Reflector")]
+        perc_steps = [x for x in all_tsteps if not str(x[0]).startswith("Reflector")]
+        if perc_steps:
+            inner = "".join(_render_one_step(t, tx, si, im) for (t, tx, si, im) in perc_steps)
+            parts.append(f'<details open><summary>🔧 이 턴의 실행 스텝 ({len(perc_steps)}개 — SAM3/Molmo/GraspNet 결과 이미지 + IK/move) — 클릭</summary>'
                          f'<div class="dbody">{inner}</div></details>')
 
         # 🎬 EXECUTION RESULT (before→after): video_turn_{i} is saved per turn index, and ONLY
@@ -324,6 +341,13 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
                                  f'<video src="{uri}" controls muted loop></video></div>')
             else:
                 parts.append('<p class="pin">🎬 실행결과: 영상 없음 — 이 턴은 로봇이 움직이지 않음 (코드 에러/무동작)</p>')
+
+        # 🪞 Reflector — runs AFTER this turn's execution: input (code + video) → output (반성 + VERDICT).
+        # Rendered last so the per-turn order is: VDM → Coder in/out → 실행 스텝 → 영상 → Reflector.
+        if reflector_steps:
+            inner = "".join(_render_one_step(t, tx, si, im) for (t, tx, si, im) in reflector_steps)
+            parts.append('<details open><summary>🪞 Reflector (입력: 코드+영상 → 출력: 반성 + VERDICT) — 클릭</summary>'
+                         f'<div class="dbody">{inner}</div></details>')
         parts.append('</div>')
     return "\n".join(parts)
 
@@ -488,7 +512,7 @@ def main():
         perc_dir = (root / "perception" / f"trial_{_m.group(1)}") if _m else None
         vdm_by_turn = load_vdm_by_turn(perc_dir)
         steps_by_turn = load_steps_by_turn(perc_dir)
-        sec.append('<h3>턴별 정리 (VDM 입출력 → Coder 입출력 → 실행 스텝 perception/control → 영상)</h3>')
+        sec.append('<h3>턴별 정리 (각 턴: VDM 초기묘사 → Coder 입력·출력 → 실행 스텝(perception/control) → 영상 → Reflector 입력·출력)</h3>')
         sec.append(render_turns(responses, td, vdm_by_turn, steps_by_turn) if responses else '<p class="muted">all_responses.json 없음</p>')
         # raw flat inference timeline kept as a collapsed appendix (per-turn steps are above)
         tl = render_timeline(perc_dir)
