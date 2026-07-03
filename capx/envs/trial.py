@@ -354,35 +354,50 @@ def _log_vdm_io(tool: str, prompt: list[dict[str, Any]], output: str, images: li
         pass
 
 
+def _render_reflector_prompt_for_log(prompt: list[dict[str, Any]], frames: list[np.ndarray]) -> str:
+    """Render the ACTUAL messages sent to the Reflector as readable text for the report.
+
+    Text blocks are shown verbatim (exactly what the model receives); image_url (mp4 base64)
+    blocks are replaced with a short marker since the base64 payload is huge and unreadable.
+    """
+    out: list[str] = []
+    vid_idx = 0
+    for msg in prompt:
+        role = str(msg.get("role", "")).upper()
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            out.append(f"=== {role} ===\n{content}")
+            continue
+        parts: list[str] = []
+        for blk in content:
+            if blk.get("type") == "text":
+                parts.append(blk["text"])
+            elif blk.get("type") == "image_url":
+                if vid_idx == 0:
+                    parts.append(
+                        f"[영상 mp4(base64) 생략 — 메인 카메라 {len(frames)}프레임을 {REFLECTOR_ENCODE_FPS}fps로 "
+                        f"인코딩해 전송 → gemini 실동작 ~{REFLECTOR_TARGET_FPS}fps 샘플. 아래 첫/마지막 프레임 참조]"
+                    )
+                else:
+                    parts.append("[영상 mp4(base64) 생략 — wrist 카메라]")
+                vid_idx += 1
+        out.append(f"=== {role} ===\n" + "\n".join(parts))
+    return "\n\n".join(out)
+
+
 def _log_reflector_io(
-    task_description: str,
-    executed_code: str,
-    stdout: str,
-    stderr: str,
+    prompt: list[dict[str, Any]],
     frames: list[np.ndarray],
     output: str,
     turn_tag: str,
 ) -> None:
-    """Record one Reflector call (code + video input → reflection + verdict) for the viz tool."""
+    """Record one Reflector call for the viz tool — logs the ACTUAL prompt sent to the model."""
     try:
         from capx.utils.execution_logger import log_step as _log
-        if frames:
-            video_note = (
-                f"[메인 카메라 영상: {len(frames)} 프레임을 {REFLECTOR_ENCODE_FPS}fps mp4로 전송 → gemini가 "
-                f"저해상도로 실동작 ~{REFLECTOR_TARGET_FPS}fps 샘플 — 아래는 report 표시용 첫/마지막 프레임]"
-            )
-        else:
-            video_note = "[영상 없음: 시뮬레이터 전진 전 코드 에러(또는 무동작) — 코드+stdout/stderr만으로 반성]"
-        input_text = (
-            f"[Task goal]\n{task_description}\n\n"
-            f"[실행한 코드]\n{executed_code}\n\n"
-            f"[stdout]\n{stdout or '(empty)'}\n\n"
-            f"[stderr]\n{stderr or '(empty)'}\n\n"
-            f"{video_note}"
-        )
+        input_text = _render_reflector_prompt_for_log(prompt, frames)
         imgs = ([frames[0], frames[-1]] if len(frames) > 1 else list(frames[:1])) if frames else []
-        _log(f"Reflector[{turn_tag}] · 코드+영상 반성 (입력 → 출력)",
-             f"[Reflector 입력]\n{input_text}\n\n[Reflector 출력]\n{output}",
+        _log(f"Reflector[{turn_tag}] · 실제 전송 프롬프트 (입력 → 출력)",
+             f"[Reflector 입력 — 모델에 실제 전송된 프롬프트]\n{input_text}\n\n[Reflector 출력]\n{output}",
              images=imgs)
     except Exception:
         pass
@@ -710,7 +725,7 @@ def _get_reflection(
     ]
     raw = _query_model(reflector_args, prompt)["content"]
     verdict, reflection = _parse_reflection(raw)
-    _log_reflector_io(task_description, executed_code, stdout, stderr, turn_frames, raw or "", turn_tag)
+    _log_reflector_io(prompt, turn_frames, raw or "", turn_tag)
     return {"verdict": verdict, "reflection": reflection, "raw": raw or ""}
 
 
