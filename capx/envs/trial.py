@@ -361,7 +361,6 @@ def _render_reflector_prompt_for_log(prompt: list[dict[str, Any]], frames: list[
     blocks are replaced with a short marker since the base64 payload is huge and unreadable.
     """
     out: list[str] = []
-    vid_idx = 0
     for msg in prompt:
         role = str(msg.get("role", "")).upper()
         content = msg.get("content", "")
@@ -373,14 +372,13 @@ def _render_reflector_prompt_for_log(prompt: list[dict[str, Any]], frames: list[
             if blk.get("type") == "text":
                 parts.append(blk["text"])
             elif blk.get("type") == "image_url":
-                if vid_idx == 0:
-                    parts.append(
-                        f"[영상 mp4(base64) 생략 — 메인 카메라 {len(frames)}프레임을 {REFLECTOR_ENCODE_FPS}fps로 "
-                        f"인코딩해 전송 → gemini 실동작 ~{REFLECTOR_TARGET_FPS}fps 샘플. 아래 첫/마지막 프레임 참조]"
-                    )
-                else:
-                    parts.append("[영상 mp4(base64) 생략 — wrist 카메라]")
-                vid_idx += 1
+                # Neutral marker — the camera/view is identified by the text block right above
+                # each video ('Camera view "X":' for multiview, or the main/wrist description for
+                # single-view), so don't hard-label main/wrist here (which mislabels view 2+).
+                parts.append(
+                    f"[영상 mp4(base64) 생략 — 위에 표시된 뷰의 실행 영상 {len(frames)}프레임을 "
+                    f"{REFLECTOR_ENCODE_FPS}fps로 인코딩 → gemini 실동작 ~{REFLECTOR_TARGET_FPS}fps 샘플]"
+                )
         out.append(f"=== {role} ===\n" + "\n".join(parts))
     return "\n\n".join(out)
 
