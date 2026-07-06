@@ -41,6 +41,7 @@ class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):
         viser_debug: bool = False,
         privileged: bool = True,
         enable_render: bool = False,
+        render_camera_names: list[str] | None = None,
     ) -> None:
         super().__init__(
             controller_cfg=controller_cfg,
@@ -49,10 +50,14 @@ class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):
             viser_debug=False,
             privileged=privileged,
             enable_render=enable_render,
+            render_camera_names=render_camera_names,
         )
 
         self.save_camera_name = "birdview"
         self.render_camera_names = [self.save_camera_name]
+        if render_camera_names is not None:
+            self.render_camera_names = list(render_camera_names)
+            self.save_camera_name = self.render_camera_names[0]
 
         # Initialize Robosuite environment
         self.privileged = privileged
@@ -339,12 +344,12 @@ class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):
 
         robosuite_obs["nut_poses"] = pose_dict
 
-        # Nut assembly uses birdview camera but stores results under "robot0_robotview" key
+        # Populate each requested camera under its OWN key so multi-view code (SAM, plan_grasp)
+        # can query any view. robot0_robotview is aliased to the primary view afterwards for
+        # backward compat (nut historically exposed its single camera as "robot0_robotview").
         for camera_name in self.render_camera_names:
             if camera_name not in robosuite_obs:
                 robosuite_obs[camera_name] = {}
-            if "robot0_robotview" not in robosuite_obs:
-                robosuite_obs["robot0_robotview"] = {}
 
             cam_world_wxyz_xyz = np.concatenate(
                 [
@@ -369,7 +374,7 @@ class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):
                 )
             )
 
-            robosuite_obs["robot0_robotview"]["pose"] = (
+            robosuite_obs[camera_name]["pose"] = (
                 np.concatenate(
                     [
                         cam_robot_tf.translation(),
@@ -377,7 +382,7 @@ class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):
                     ]
                 )
             )
-            robosuite_obs["robot0_robotview"]["pose_mat"] = cam_robot_tf.as_matrix()
+            robosuite_obs[camera_name]["pose_mat"] = cam_robot_tf.as_matrix()
 
             cam_id = self.robosuite_env.sim.model.camera_name2id(camera_name)
             fovy = self.robosuite_env.sim.model.cam_fovy[cam_id]
@@ -386,18 +391,22 @@ class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):
             K = np.array(
                 [[f, 0, 0.5 * self._render_width], [0, f, 0.5 * self._render_height], [0, 0, 1]]
             )
-            robosuite_obs["robot0_robotview"]["intrinsics"] = K
+            robosuite_obs[camera_name]["intrinsics"] = K
 
-            robosuite_obs["robot0_robotview"]["images"] = {}
+            robosuite_obs[camera_name]["images"] = {}
             if camera_name + "_image" in robosuite_obs:
-                robosuite_obs["robot0_robotview"]["images"]["rgb"] = robosuite_obs[
+                robosuite_obs[camera_name]["images"]["rgb"] = robosuite_obs[
                     camera_name + "_image"
                 ][::-1]
             if camera_name + "_depth" in robosuite_obs:
                 depth_metric = get_real_depth_map(
                     self.robosuite_env.sim, robosuite_obs[camera_name + "_depth"][::-1]
                 )
-                robosuite_obs["robot0_robotview"]["images"]["depth"] = depth_metric
+                robosuite_obs[camera_name]["images"]["depth"] = depth_metric
+
+        # Backward-compat alias: robot0_robotview -> primary (first) view.
+        if self.render_camera_names:
+            robosuite_obs["robot0_robotview"] = robosuite_obs[self.render_camera_names[0]]
 
         self._compute_gripper_obs(robosuite_obs)
 

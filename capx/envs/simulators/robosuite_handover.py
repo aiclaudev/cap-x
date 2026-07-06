@@ -40,12 +40,17 @@ class RobosuiteHandoverEnv(BaseEnv):
         viser_debug: bool = False,  # TODO: move the viser visualization manager into a separate class, low level env agnostic
         privileged: bool = False,
         enable_render: bool = False,
+        render_camera_names: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.controller_cfg = controller_cfg
         self.max_steps = max_steps
         self.save_camera_name = "agentview"  # Scene-level camera to show both arms
         self.render_camera_names = ["agentview"]  # Scene-level camera for observations
+        if render_camera_names is not None:
+            self.render_camera_names = list(render_camera_names)
+            self.save_camera_name = self.render_camera_names[0]
+        self._render_camera_names_override = render_camera_names
         self.segmentation_level = "instance"
 
         self._render_width = 512
@@ -614,7 +619,7 @@ class RobosuiteHandoverEnv(BaseEnv):
             ]
         )
 
-        if len(self.render_camera_names) == 1:
+        if self.render_camera_names:
             robosuite_obs["robot0_robotview"] = robosuite_obs[self.render_camera_names[0]]
 
         return robosuite_obs

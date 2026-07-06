@@ -46,12 +46,17 @@ class RobosuiteBaseEnv(BaseEnv):
         viser_debug: bool = False,
         privileged: bool = False,
         enable_render: bool = False,
+        render_camera_names: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.controller_cfg = controller_cfg
         self.max_steps = max_steps
         self.save_camera_name = "robot0_robotview"
         self.render_camera_names = [self.save_camera_name]
+        if render_camera_names is not None:
+            self.render_camera_names = list(render_camera_names)
+            self.save_camera_name = self.render_camera_names[0]
+        self._render_camera_names_override = render_camera_names
         self.segmentation_level = "instance"
 
         self._render_width = 512
