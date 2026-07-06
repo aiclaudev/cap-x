@@ -1,0 +1,61 @@
+# agentv2 (Reflector + multi-view) — generated from the agentv1 config.
+# views: ['robot0_robotview', 'robot0_eye_in_hand', 'frontview']
+env:
+  _target_: capx.envs.tasks.franka.franka_spill_wipe.FrankaSpillWipeCodeEnv
+  cfg:
+    _target_: capx.envs.tasks.base.CodeExecEnvConfig
+    low_level: franka_robosuite_spill_wipe_low_level
+    privileged: false
+    apis:
+    - FrankaControlApiReducedSkillLibrarySpillWipe
+    prompt: "NOTE: This task provides MULTIPLE camera views. get_observation() returns a separate entry for each of: robot0_robotview, robot0_eye_in_hand, frontview. Each entry has ['images']['rgb'], ['images']['depth'], ['intrinsics'], ['pose_mat'] just like robot0_robotview. You may run perception (segment_sam3_text_prompt, plan_grasp, mask_to_world_points, etc.) on ANY of these views to get better coverage and angles; pick the view(s) best suited to what you need to see.\n\nYou are controlling a Franka Emika robot with API described below.\nGoal: wipe up the 'brown spill'. \nA sponge is already attached to your gripper/end-effector.\nThe table surface height is exactly z = 0.0 m, and wiping should be performed at that height (no extra offset).\nUse the spill extents to inform the min/max x and y bounds of wiping motions.\nAvoid large wiping motions since large deltas between inverse kinematics solutions may not guarantee optimal trajectories.\nA sponge is already attached to the end-effector,\
+      \ and you should use a downward-facing orientation (0,0,1,0 wxyz) for wiping.\nYou may write python code comments for reasoning but ONLY write the executable Python code and do not write it in code fences.\nAfter this code executes, you will receive the current console stdout and stderr (any errors or print statements made in the code). You will then have the chance to write new code to query the environment state and/or complete the task.\nThe functions (APIs) below are already imported to the environment. If you want to use numpy, you need to import it explicitly.\n"
+    multi_turn_prompt: 'The following code blocks were just executed:
+
+      ```python
+
+      {executed_code}
+
+      ```
+
+      The current console stdout is:
+
+      ```
+
+      {console_stdout}
+
+      ```
+
+      The current console stderr is:
+
+      ```
+
+      {console_stderr}
+
+      ```
+
+      '
+    render_camera_names:
+    - robot0_robotview
+    - robot0_eye_in_hand
+    - frontview
+api_servers:
+- _target_: capx.serving.launch_sam3_server.main
+  device: cuda
+  port: 8114
+  host: 127.0.0.1
+- _target_: capx.serving.launch_pyroki_server.main
+  port: 8116
+  host: 127.0.0.1
+  robot: panda_description
+  target_link: panda_hand
+model: google/gemini-3.1-pro-preview
+reflector_model: google/gemini-3.1-pro-preview
+reasoning_effort: low
+use_reflector: true
+version: agentv2
+record_video: true
+save_multiturn_prompts: true
+output_dir: ./outputs/franka_robosuite_spill_wipe
+trials: 1
+num_workers: 1

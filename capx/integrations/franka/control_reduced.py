@@ -141,8 +141,16 @@ class FrankaControlApiReduced(ApiBase):
         """
         self._log_step("get_observation", "Capturing camera observation …")
         obs = self._env.get_observation()
-        obs["robot0_robotview"]["images"]["depth"] = obs["robot0_robotview"]["images"]["depth"].squeeze(-1)
-        self._log_step_update(images=obs["robot0_robotview"]["images"]["rgb"])
+        # Squeeze depth (H,W,1)->(H,W) for EVERY rendered camera view (not just robot0_robotview),
+        # so multi-view code gets a uniform depth shape across all views. Single-view configs still
+        # only have robot0_robotview here, so behavior is unchanged for them.
+        for view in obs.values():
+            if isinstance(view, dict) and isinstance(view.get("images"), dict):
+                depth = view["images"].get("depth")
+                if depth is not None and getattr(depth, "ndim", 0) == 3 and depth.shape[-1] == 1:
+                    view["images"]["depth"] = depth.squeeze(-1)
+        if "robot0_robotview" in obs and isinstance(obs["robot0_robotview"].get("images"), dict):
+            self._log_step_update(images=obs["robot0_robotview"]["images"]["rgb"])
         return obs
 
     # - ["robot_joint_pos"]: Current joint positions of the robot (including gripper as the last element) as a numpy array of shape (8,), dtype float64.
