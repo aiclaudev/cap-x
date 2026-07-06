@@ -118,7 +118,33 @@ class ApiBase(ABC):
                 lines.append("  Doc:")
                 lines.extend(f"    {ln}" for ln in doc.splitlines())
             lines.append("")
-        return "\n".join(lines).strip()
+        doc = "\n".join(lines).strip()
+        # agentv2 multi-view: when the env exposes >1 render camera, append a dynamic block
+        # listing the actual view names so the model queries them (the static get_observation
+        # docstring only documents robot0_robotview). Single-view configs (cap-agent0/agentv1)
+        # have <=1 view here, so this is skipped and their prompt is unchanged.
+        views = getattr(getattr(self, "_env", None), "render_camera_names", None)
+        if views and len(views) > 1:
+            doc += "\n\n" + self._multiview_camera_doc(list(views))
+        return doc
+
+    def _multiview_camera_doc(self, views: list[str]) -> str:
+        """Dynamic 'available camera views' block for multi-view (agentv2) envs."""
+        scene = views[0]
+        wrist = next((v for v in views if "eye_in_hand" in v), views[-1])
+        return (
+            "AVAILABLE CAMERA VIEWS (IMPORTANT — READ THIS):\n"
+            f"  get_observation() returns a SEPARATE entry for EACH of these camera views: {', '.join(views)}.\n"
+            '  Each entry has ["images"]["rgb"] (H,W,3), ["images"]["depth"] (H,W), ["intrinsics"] (3,3), ["pose_mat"] (4,4).\n'
+            "  These are DIFFERENT viewpoints of the same scene. Use whichever view(s) best see your target —\n"
+            "  do NOT restrict yourself to robot0_robotview. A wrist view (..._eye_in_hand) gives a close-up of\n"
+            "  the gripper/object; a scene view gives global layout. Example:\n"
+            "    obs = get_observation()\n"
+            f'    rgb_scene = obs["{scene}"]["images"]["rgb"]\n'
+            f'    rgb_wrist = obs["{wrist}"]["images"]["rgb"]\n'
+            f'    masks = segment_sam3_text_prompt(rgb_wrist, "<your target>")   # run perception on the best view\n'
+            f'    depth = obs["{wrist}"]["images"]["depth"]; K = obs["{wrist}"]["intrinsics"]; pose = obs["{wrist}"]["pose_mat"]'
+        )
 
 
 _API_FACTORIES: dict[str, Callable[[], ApiBase]] = {}
