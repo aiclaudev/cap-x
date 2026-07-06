@@ -469,20 +469,25 @@ def main():
     trial_dirs = sorted([d for d in root.iterdir() if d.is_dir() and d.name.startswith("trial_")])
 
     # A single multiturn trial writes one dir per intermediate turn-snapshot (same trial number,
-    # differing reward suffix). Collapse to the most complete dir per trial number so "1 run" shows
-    # exactly 1 card: rank by (#turn videos, reward) — the final attempt has the videos + best reward.
-    def _completeness(d: Path):
+    # differing reward suffix). Collapse to ONE dir per trial number so "1 run" shows exactly 1 card.
+    # Rank by (has turn videos, mtime): the FINAL save of the latest run is newest and carries the
+    # per-turn videos. Ranking by #videos alone is wrong when the same index was written by multiple
+    # separate runs — an older run with more turn videos would win and the report would show stale
+    # videos. mtime picks the latest run's final state; the has-videos flag avoids a video-less
+    # intermediate that happens to be newest.
+    def _rank(d: Path):
+        has_vid = len(list(d.glob("video_turn_*.mp4"))) > 0
         try:
-            rw = float(parse_trial_dirname(d.name).get("reward") or 0.0)
-        except ValueError:
-            rw = 0.0
-        return (len(list(d.glob("video_turn_*.mp4"))), rw)
+            mtime = d.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return (has_vid, mtime)
 
     best: dict[str, Path] = {}
     for d in trial_dirs:
         m = re.match(r"(trial_\d+)", d.name)
         key = m.group(1) if m else d.name
-        if key not in best or _completeness(d) > _completeness(best[key]):
+        if key not in best or _rank(d) > _rank(best[key]):
             best[key] = d
     trial_dirs = [best[k] for k in sorted(best)]
 
