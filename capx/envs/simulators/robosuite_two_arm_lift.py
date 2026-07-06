@@ -614,6 +614,7 @@ class RobosuiteTwoArmLiftEnv(BaseEnv):
         self._record_frames = enabled
         if clear:
             self._frame_buffer.clear()
+            self._multiview_frame_buffers = {}
         if enabled:
             self._record_frame()
 
@@ -622,6 +623,13 @@ class RobosuiteTwoArmLiftEnv(BaseEnv):
         if clear:
             self._frame_buffer.clear()
         return frames
+
+    def get_multiview_frames_range(self, start: int, end: int) -> dict[str, list[np.ndarray]]:
+        """Per-view frames for a turn: {view_name: frames[start:end]} (agentv2 Reflector)."""
+        return {
+            view: [f.copy() for f in buf[start:end]]
+            for view, buf in getattr(self, "_multiview_frame_buffers", {}).items()
+        }
 
     def _record_frame(self) -> None:
         if not self._record_frames:
@@ -633,7 +641,24 @@ class RobosuiteTwoArmLiftEnv(BaseEnv):
             height=self._render_height,
             depth=False,
         )
-        self._frame_buffer.append(frame[::-1])  # Flip vertically
+        primary = frame[::-1]  # Flip vertically
+        self._frame_buffer.append(primary)
+
+        # agentv2: record every render camera under its own buffer for the Reflector.
+        if len(self.render_camera_names) > 1:
+            if not hasattr(self, "_multiview_frame_buffers"):
+                self._multiview_frame_buffers = {}
+            for view in self.render_camera_names:
+                if view == self.save_camera_name:
+                    vf = primary
+                else:
+                    vf = self.robosuite_env.sim.render(
+                        camera_name=view,
+                        width=self._render_width,
+                        height=self._render_height,
+                        depth=False,
+                    )[::-1]
+                self._multiview_frame_buffers.setdefault(view, []).append(vf)
 
     def render(self, mode: str = "rgb_array") -> np.ndarray:  # type: ignore[override]
         if mode != "rgb_array":

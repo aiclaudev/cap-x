@@ -352,6 +352,12 @@ class CodeExecutionEnvBase(Env):
             return [f.copy() for f in self.low_level_env._frame_buffer[start:end]]
         return []
 
+    def get_multiview_frames_range(self, start: int, end: int) -> dict[str, list[np.ndarray]]:
+        """agentv2: per-view frames for a turn — {view_name: frames[start:end]}."""
+        if hasattr(self.low_level_env, "get_multiview_frames_range"):
+            return self.low_level_env.get_multiview_frames_range(start, end)
+        return {}
+
     def get_wrist_video_frames(self, *, clear: bool = False) -> list[np.ndarray]:
         if hasattr(self.low_level_env, "get_wrist_video_frames"):
             return self.low_level_env.get_wrist_video_frames(clear=clear)

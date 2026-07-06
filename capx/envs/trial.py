@@ -649,6 +649,7 @@ def _get_reflection(
     stderr: str,
     wrist_turn_frames: list[np.ndarray] | None = None,
     turn_tag: str = "",
+    multiview_frames: dict[str, list[np.ndarray]] | None = None,
 ) -> dict[str, str] | None:
     """agentv1 Reflector: review executed code + execution video and reflect on what to fix.
 
@@ -673,7 +674,9 @@ def _get_reflection(
     # simulator advances — e.g. perception/IK returns None and raises during planning. Do NOT
     # skip the Reflector in that case (skipping silently ends the trial with no corrective turn);
     # reflect on the code + stdout/stderr traceback alone so pure-code crashes still get retried.
-    has_video = bool(turn_frames)
+    # agentv2: multiview_frames = {view_name: frames}; keep only views that actually have frames.
+    mv = {v: f for v, f in (multiview_frames or {}).items() if f}
+    has_video = bool(turn_frames) or bool(mv)
 
     user_content: list[dict[str, Any]] = [
         {"type": "text", "text": f"Task goal:\n{task_description}"},
@@ -683,7 +686,23 @@ def _get_reflection(
         {"type": "text", "text": f"Console stderr:\n{stderr or '(empty)'}"},
     ]
 
-    if has_video:
+    if mv:
+        # agentv2: one labelled video PER camera view — the same execution from several angles.
+        user_content.append({
+            "type": "text",
+            "text": (
+                f"The following {len(mv)} videos show the SAME execution of that code, each from a "
+                f"different named camera view ({', '.join(mv)}). Each video is preceded by its view name. "
+                "Use whichever view(s) best reveal what happened, then reflect on what to fix next."
+            ),
+        })
+        for view_name, frames in mv.items():
+            user_content.append({"type": "text", "text": f'Camera view "{view_name}":'})
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": _encode_video_base64(frames, fps=REFLECTOR_ENCODE_FPS)},
+            })
+    elif has_video:
         video_base64 = _encode_video_base64(turn_frames, fps=REFLECTOR_ENCODE_FPS)  # → gemini ~5fps of real motion
         user_content.extend([
             {
@@ -706,7 +725,9 @@ def _get_reflection(
             ),
         })
 
-    if has_video and wrist_turn_frames:
+    # Single-view path only: append the optional wrist video. In the multiview path the wrist
+    # (eye_in_hand) view is already one of the labelled videos above, so don't duplicate it.
+    if has_video and not mv and wrist_turn_frames:
         wrist_video_base64 = _encode_video_base64(wrist_turn_frames, fps=REFLECTOR_ENCODE_FPS)
         user_content.extend([
             {
@@ -787,6 +808,7 @@ def _handle_multi_turn_step(
     wrist_turn_frames: list[np.ndarray] | None = None,
     wrist_base64_history: list[str] | None = None,
     reflector_args: ModelQueryArgs | None = None,
+    multiview_frames: dict[str, list[np.ndarray]] | None = None,
 ) -> tuple[str, str | None, str | None, dict | None, list | None]:
     """Execute one multi-turn decision step.
 
@@ -828,6 +850,7 @@ def _handle_multi_turn_step(
             info_step["stderr"],
             wrist_turn_frames,
             turn_tag=f"turn{code_block_idx}",
+            multiview_frames=multiview_frames,
         )
         if reflection_out is None:
             # Reflector could not run at all (should be rare — it now reflects on code+stderr even
@@ -1142,12 +1165,18 @@ def _run_single_trial(
             # Get turn frames for video differencing
             turn_frames = None
             wrist_turn_frames = None
+            multiview_frames = None
             if (use_video_diff or use_reflector) and recording_frames:
                 turn_frames = env.get_video_frames_range(frame_start, frame_end)
                 if use_wrist and hasattr(env, "get_wrist_video_frames_range"):
                     wrist_turn_frames = env.get_wrist_video_frames_range(
                         frame_start, frame_end,
                     )
+                # agentv2: per-view frames so the Reflector sees every camera separately (labelled).
+                if use_reflector and hasattr(env, "get_multiview_frames_range"):
+                    mvf = env.get_multiview_frames_range(frame_start, frame_end)
+                    if mvf and len(mvf) > 1:
+                        multiview_frames = mvf
 
             decision, new_code, mt_reasoning, mt_ensemble, decision_prompt = _handle_multi_turn_step(
                 env, obs, args, config, visual_differencing_args,
@@ -1158,6 +1187,7 @@ def _run_single_trial(
                 wrist_turn_frames=wrist_turn_frames,
                 wrist_base64_history=wrist_base64_history,
                 reflector_args=reflector_args,
+                multiview_frames=multiview_frames,
             )
 
             if mt_ensemble is not None:

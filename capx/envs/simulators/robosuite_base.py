@@ -71,6 +71,9 @@ class RobosuiteBaseEnv(BaseEnv):
         self._record_frames = False
         self._frame_buffer: list[np.ndarray] = []
         self._wrist_frame_buffer: list[np.ndarray] = []
+        # agentv2: per-view frame buffers (view_name -> frames), index-aligned with _frame_buffer.
+        # Populated only when >1 render camera, so the Reflector can see every view separately.
+        self._multiview_frame_buffers: dict[str, list[np.ndarray]] = {}
         self._record_wrist_camera = False
         self._wrist_camera_name = "robot0_eye_in_hand"
         self._subsample_rate = self._SUBSAMPLE_RATE
@@ -332,6 +335,7 @@ class RobosuiteBaseEnv(BaseEnv):
         if clear:
             self._frame_buffer.clear()
             self._wrist_frame_buffer.clear()
+            self._multiview_frame_buffers = {}
         if enabled:
             self._record_frame()
 
@@ -356,6 +360,13 @@ class RobosuiteBaseEnv(BaseEnv):
     def get_wrist_video_frames_range(self, start: int, end: int) -> list[np.ndarray]:
         return [frame.copy() for frame in self._wrist_frame_buffer[start:end]]
 
+    def get_multiview_frames_range(self, start: int, end: int) -> dict[str, list[np.ndarray]]:
+        """Per-view frames for a turn: {view_name: frames[start:end]} (agentv2 Reflector)."""
+        return {
+            view: [f.copy() for f in buf[start:end]]
+            for view, buf in self._multiview_frame_buffers.items()
+        }
+
     def _record_frame(self) -> None:
         if not self._record_frames:
             return
@@ -366,7 +377,23 @@ class RobosuiteBaseEnv(BaseEnv):
             height=self._render_height,
             depth=False,
         )
-        self._frame_buffer.append(frame[::-1])  # Flip vertically
+        primary = frame[::-1]  # Flip vertically
+        self._frame_buffer.append(primary)
+
+        # agentv2: record every render camera under its own buffer (reuse the primary render;
+        # only the extra views cost an additional render). Kept index-aligned with _frame_buffer.
+        if len(self.render_camera_names) > 1:
+            for view in self.render_camera_names:
+                if view == self.save_camera_name:
+                    vf = primary
+                else:
+                    vf = self.robosuite_env.sim.render(
+                        camera_name=view,
+                        width=self._render_width,
+                        height=self._render_height,
+                        depth=False,
+                    )[::-1]
+                self._multiview_frame_buffers.setdefault(view, []).append(vf)
 
         if self._record_wrist_camera:
             wrist_frame = self.robosuite_env.sim.render(
