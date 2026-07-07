@@ -21,11 +21,19 @@ from viz_trial import CSS, esc, parse_trial_dirname  # reuse the design + parsin
 
 
 def _completeness(d: Path):
+    # Dedup key when a trial number has multiple rollout dirs (retries / accumulated re-runs):
+    # prefer the MOST RECENT rollout (all_responses.json write time — not muddied by post-proc),
+    # then video count, then reward. Matches the cleanup policy (keep latest attempt per trial).
+    ar = d / "all_responses.json"
+    try:
+        rec = ar.stat().st_mtime if ar.exists() else d.stat().st_mtime
+    except OSError:
+        rec = 0.0
     try:
         rw = float(parse_trial_dirname(d.name).get("reward") or 0.0)
     except (TypeError, ValueError):
         rw = 0.0
-    return (len(list(d.glob("video_turn_*.mp4"))), rw)
+    return (rec, len(list(d.glob("video_turn_*.mp4"))), rw)
 
 
 def _friendly(task_dirname: str) -> str:
