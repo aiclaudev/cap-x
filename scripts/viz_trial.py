@@ -79,6 +79,14 @@ def b64_data_uri(path: Path) -> str | None:
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
 
 
+def rel_media_src(path: Path, tdir: Path) -> str:
+    """Relative URL from the report (written at tdir.parent) to a media file inside tdir.
+    Used for videos so report.html stays tiny (no MB-sized base64). Requires the report to be
+    SERVED alongside the output tree (Live Preview / http server) — not portable as a lone file."""
+    from urllib.parse import quote
+    return quote(f"{tdir.name}/{path.name}")
+
+
 def esc(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
@@ -334,11 +342,10 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
         if dec in ("initial", "regenerate"):
             vid = tdir / f"video_turn_{i:02d}.mp4"
             if vid.exists():
-                uri = b64_data_uri(vid)
-                if uri:
-                    parts.append(f'<div style="margin-top:8px"><b>🎬 실행결과 (전→후):</b> '
-                                 f'<span class="pin">{esc(vid.name)}</span><br>'
-                                 f'<video src="{uri}" controls muted loop></video></div>')
+                src = rel_media_src(vid, tdir)
+                parts.append(f'<div style="margin-top:8px"><b>🎬 실행결과 (전→후):</b> '
+                             f'<span class="pin">{esc(vid.name)}</span><br>'
+                             f'<video src="{src}" controls muted loop></video></div>')
             else:
                 parts.append('<p class="pin">🎬 실행결과: 영상 없음 — 이 턴은 로봇이 움직이지 않음 (코드 에러/무동작)</p>')
 
@@ -430,9 +437,8 @@ def render_media(tdir: Path, perc_dir: Path | None = None) -> str:
     # combined rollout video only (per-turn videos are now shown inline in each turn card)
     cv = tdir / "video_combined.mp4"
     if cv.exists():
-        uri = b64_data_uri(cv)
-        if uri:
-            parts.append(f'<h3>전체 롤아웃 영상 (combined)</h3><video src="{uri}" controls muted loop></video>')
+        src = rel_media_src(cv, tdir)
+        parts.append(f'<h3>전체 롤아웃 영상 (combined)</h3><video src="{src}" controls muted loop></video>')
     return "\n".join(parts)
 
 
@@ -540,7 +546,7 @@ def main():
 <p class="sub">{esc(str(root))} · trials: {len(trial_dirs)}</p>
 <h2>개요</h2>{overview}
 {''.join(sections)}
-<p class="pin" style="margin-top:30px">생성: scripts/viz_trial.py — 미디어는 base64 임베드(파일 단독 열람 가능).</p>
+<p class="pin" style="margin-top:30px">생성: scripts/viz_trial.py — 이미지=base64 임베드, 영상=파일 참조(상대경로) — 서버/Live Preview로 서빙 시 재생.</p>
 </div></body></html>"""
 
     out_path.write_text(htmldoc)
