@@ -619,7 +619,9 @@ class RobosuiteHandoverEnv(BaseEnv):
             ]
         )
 
-        if self.render_camera_names:
+        # Alias robot0_robotview -> primary view ONLY if it wasn't itself a rendered
+        # camera; otherwise aliasing would clobber its own (correct) images.
+        if self.render_camera_names and "robot0_robotview" not in self.render_camera_names:
             robosuite_obs["robot0_robotview"] = robosuite_obs[self.render_camera_names[0]]
 
         return robosuite_obs

@@ -404,8 +404,11 @@ class FrankaRobosuiteNutAssembly(RobosuiteBaseEnv):
                 )
                 robosuite_obs[camera_name]["images"]["depth"] = depth_metric
 
-        # Backward-compat alias: robot0_robotview -> primary (first) view.
-        if self.render_camera_names:
+        # Backward-compat alias: robot0_robotview -> primary (first) view, ONLY when
+        # robot0_robotview was not itself a rendered camera. If it IS in the render list
+        # it already holds its own (correct) images above; aliasing here would clobber it
+        # with the primary view (e.g. birdview) — the exact multi-view mix-up we must avoid.
+        if self.render_camera_names and "robot0_robotview" not in self.render_camera_names:
             robosuite_obs["robot0_robotview"] = robosuite_obs[self.render_camera_names[0]]
 
         self._compute_gripper_obs(robosuite_obs)
