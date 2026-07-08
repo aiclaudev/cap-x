@@ -1,0 +1,64 @@
+# agentv2 (Reflector + multi-view) — generated from the agentv1 config.
+# views: ['robot0_robotview', 'robot0_eye_in_hand', 'frontview']
+env:
+  _target_: capx.envs.tasks.franka.franka_cube_restack.FrankaRestackCodeEnv
+  cfg:
+    _target_: capx.envs.tasks.base.CodeExecEnvConfig
+    low_level: franka_robosuite_cubes_restack_low_level
+    privileged: false
+    apis:
+    - FrankaControlApiReducedSkillLibrary
+    prompt: "IMPORTANT — MULTIPLE CAMERA VIEWS ARE AVAILABLE. get_observation() returns a dict with a\nSEPARATE entry for EACH of these views: robot0_robotview, robot0_eye_in_hand, frontview.\nEach entry has [\"images\"][\"rgb\"], [\"images\"][\"depth\"], [\"intrinsics\"], [\"pose_mat\"] exactly\nlike robot0_robotview. Different views see the scene from different angles — a wrist view\n(robot0_eye_in_hand) gives a close-up of the gripper/object, a scene view gives global layout.\nUSE the view(s) that best see what you need; do NOT restrict yourself to one view. Example:\n    obs = get_observation()\n    rgb_scene = obs[\"robot0_robotview\"][\"images\"][\"rgb\"]\n    rgb_wrist = obs[\"robot0_eye_in_hand\"][\"images\"][\"rgb\"]\n    rgb_front = obs[\"frontview\"][\"images\"][\"rgb\"]\n    # run perception on whichever view sees the target best (here the close-up):\n    masks = segment_sam3_text_prompt(rgb_wrist, \"the target cube\")\n    # depth/intrinsics/pose_mat of that same view are obs[\"\
+      robot0_eye_in_hand\"][\"images\"][\"depth\"], etc.\n\nYou are controlling a Franka Emika robot with API described below.\nGoal: place the red cube on top of the green cube and then open the gripper.\nYou may write python code comments for reasoning but ONLY write the executable Python code and do not write it in code fences.\nAfter this code executes, you will be able to get a new observation of the environment and write new code to complete the task if needed.\nThe functions (APIs) below are already imported to the environment. If you want to use numpy, you need to import it explicitly.\n"
+    multi_turn_prompt: 'The following code blocks were just executed:
+
+      ```python
+
+      {executed_code}
+
+      ```
+
+      The current console stdout is:
+
+      ```
+
+      {console_stdout}
+
+      ```
+
+      The current console stderr is:
+
+      ```
+
+      {console_stderr}
+
+      ```
+
+      '
+    render_camera_names:
+    - robot0_robotview
+    - robot0_eye_in_hand
+    - frontview
+api_servers:
+- _target_: capx.serving.launch_sam3_server.main
+  device: cuda
+  port: 8114
+  host: 127.0.0.1
+- _target_: capx.serving.launch_contact_graspnet_server.main
+  port: 8115
+  host: 127.0.0.1
+- _target_: capx.serving.launch_pyroki_server.main
+  port: 8116
+  host: 127.0.0.1
+  robot: panda_description
+  target_link: panda_hand
+model: google/gemini-3.1-pro-preview
+reflector_model: google/gemini-3.1-pro-preview
+reasoning_effort: low
+use_reflector: true
+version: agentv2
+record_video: true
+save_multiturn_prompts: true
+output_dir: ./outputs/franka_robosuite_cube_restack
+trials: 1
+num_workers: 1

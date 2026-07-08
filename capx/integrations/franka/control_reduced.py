@@ -141,8 +141,16 @@ class FrankaControlApiReduced(ApiBase):
         """
         self._log_step("get_observation", "Capturing camera observation …")
         obs = self._env.get_observation()
-        obs["robot0_robotview"]["images"]["depth"] = obs["robot0_robotview"]["images"]["depth"].squeeze(-1)
-        self._log_step_update(images=obs["robot0_robotview"]["images"]["rgb"])
+        # Squeeze depth (H,W,1)->(H,W) for EVERY rendered camera view (not just robot0_robotview),
+        # so multi-view code gets a uniform depth shape across all views. Single-view configs still
+        # only have robot0_robotview here, so behavior is unchanged for them.
+        for view in obs.values():
+            if isinstance(view, dict) and isinstance(view.get("images"), dict):
+                depth = view["images"].get("depth")
+                if depth is not None and getattr(depth, "ndim", 0) == 3 and depth.shape[-1] == 1:
+                    view["images"]["depth"] = depth.squeeze(-1)
+        if "robot0_robotview" in obs and isinstance(obs["robot0_robotview"].get("images"), dict):
+            self._log_step_update(images=obs["robot0_robotview"]["images"]["rgb"])
         return obs
 
     # - ["robot_joint_pos"]: Current joint positions of the robot (including gripper as the last element) as a numpy array of shape (8,), dtype float64.
@@ -221,9 +229,10 @@ class FrankaControlApiReduced(ApiBase):
         box_str = f" with box {box}" if box is not None else ""
         self._log_step("SAM2 Segmentation", f"Running SAM2{box_str} …", images=rgb)
         results = self.sam2_seg_fn(rgb, box=box)
-        masks = [r["mask"] for r in results if r.get("score", 0) > 0.05]
+        kept = [r for r in results if r.get("score", 0) > 0.05]
+        masks = [r["mask"] for r in kept]
         if masks:
-            vis = overlay_segmentation_masks(rgb, masks)
+            vis = overlay_segmentation_masks(rgb, masks, scores=[r.get("score", 0.0) for r in kept])
             self._log_step_update(text=f"Returned {len(results)} mask(s)", images=vis)
         else:
             self._log_step_update(text="No masks returned.")
@@ -260,9 +269,10 @@ class FrankaControlApiReduced(ApiBase):
         """
         self._log_step("SAM3 Point Segmentation", f"Running SAM3 point-prompt at ({point_coords[0]}, {point_coords[1]}) …", images=rgb)
         results = self.sam3_point_prompt_fn(Image.fromarray(rgb), point_coords)
-        masks = [r["mask"] for r in results if r.get("score", 0) > 0.05]
+        kept = [r for r in results if r.get("score", 0) > 0.05]
+        masks = [r["mask"] for r in kept]
         if masks:
-            vis = overlay_segmentation_masks(rgb, masks)
+            vis = overlay_segmentation_masks(rgb, masks, scores=[r.get("score", 0.0) for r in kept])
             if hasattr(self._env, "set_sam3_mask"):
                 self._env.set_sam3_mask(vis)
             self._log_step_update(text=f"Returned {len(results)} mask(s)", images=vis)
@@ -298,10 +308,11 @@ class FrankaControlApiReduced(ApiBase):
         """
         self._log_step("SAM3 Text Segmentation", f"Running SAM3 text-prompt: '{text_prompt}' …", images=rgb)
         results = self.sam3_seg_fn(rgb, text_prompt=text_prompt)
-        masks = [r["mask"] for r in results if r.get("score", 0) > 0.05]
+        kept = [r for r in results if r.get("score", 0) > 0.05]
+        masks = [r["mask"] for r in kept]
         if masks:
             best_score = max(r.get("score", 0) for r in results)
-            vis = overlay_segmentation_masks(rgb, masks)
+            vis = overlay_segmentation_masks(rgb, masks, scores=[r.get("score", 0.0) for r in kept])
             if hasattr(self._env, "set_sam3_mask"):
                 self._env.set_sam3_mask(vis)
             self._log_step_update(text=f"Returned {len(results)} mask(s), best score: {best_score:.3f}", images=vis)

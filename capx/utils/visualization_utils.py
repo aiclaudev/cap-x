@@ -42,6 +42,7 @@ def overlay_segmentation_masks(
     image: np.ndarray,
     masks: list[np.ndarray],
     opacity: float = 0.5,
+    scores: list[float] | None = None,
 ) -> np.ndarray:
     """Overlay up to 5 segmentation masks on an RGB image.
 
@@ -51,14 +52,21 @@ def overlay_segmentation_masks(
         image: (H, W, 3) uint8 RGB image.
         masks: List of boolean masks, each (H, W).
         opacity: Fill blend factor (0–1).
+        scores: Optional per-mask confidence scores (aligned with ``masks``).
+            When given, each mask's score is drawn as a labelled chip at the
+            top-left of its bounding box in the mask's border colour.
 
     Returns:
         (H, W, 3) uint8 image with masks overlaid.
     """
     if len(masks) > 5:
         masks = masks[:5]
+    if scores is not None:
+        scores = list(scores)[: len(masks)]
 
     output = image.copy()
+    H, W = output.shape[:2]
+    chips: list[tuple[int, int, str, tuple[int, int, int]]] = []  # (anchor_x, anchor_y, txt, border_rgb)
 
     for i in reversed(range(len(masks))):
         mask = masks[i]
@@ -74,6 +82,39 @@ def overlay_segmentation_masks(
         mask_uint8 = mask.astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(output, contours, -1, border_rgb, thickness=2)
+
+        # Collect confidence chip anchors; drawn in a second pass so mask fills
+        # never cover a chip and overlaps can be de-conflicted.
+        if scores is not None and i < len(scores) and mask_indices[0].size > 0:
+            y0 = int(mask_indices[0].min())
+            x0 = int(mask_indices[1].min())
+            chips.append((x0, y0, f"{float(scores[i]):.2f}", border_rgb))
+
+    # Second pass: draw chips with vertical collision avoidance so scores of
+    # overlapping / nested masks (e.g. nut body + inner hole) don't stack on top
+    # of each other and become unreadable.
+    placed: list[tuple[int, int, int, int]] = []  # (x1, y1, x2, y2)
+    for x0, y0, txt, border_rgb in chips:
+        (tw, th), bl = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cw, ch = tw + 4, th + bl + 3
+        x1 = min(x0, W - cw)
+        y_top = max(0, y0 - th - 3)
+        step = ch + 2
+        for _ in range(len(placed) + 1):
+            y_top = min(y_top, H - ch)
+            box = (x1, y_top, x1 + cw, y_top + ch)
+            if not any(x1 < px2 and box[2] > px1 and y_top < py2 and box[3] > py1
+                       for (px1, py1, px2, py2) in placed):
+                break
+            y_top += step  # bump down past the colliding chip
+        y_top = min(max(0, y_top), H - ch)
+        baseline = y_top + th + 1
+        cv2.rectangle(output, (x1, y_top), (x1 + cw, y_top + ch), border_rgb, -1)
+        cv2.putText(
+            output, txt, (x1 + 2, baseline),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+        placed.append((x1, y_top, x1 + cw, y_top + ch))
 
     return output
 

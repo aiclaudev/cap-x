@@ -38,6 +38,7 @@ class FrankaRobosuiteCubesLowLevel(RobosuiteBaseEnv):
         viser_debug: bool = False,
         privileged: bool = False,
         enable_render: bool = False,
+        render_camera_names: list[str] | None = None,
     ) -> None:
         super().__init__(
             controller_cfg=controller_cfg,
@@ -46,6 +47,7 @@ class FrankaRobosuiteCubesLowLevel(RobosuiteBaseEnv):
             viser_debug=False,
             privileged=privileged,
             enable_render=enable_render,
+            render_camera_names=render_camera_names,
         )
 
         # Initialize Robosuite environment

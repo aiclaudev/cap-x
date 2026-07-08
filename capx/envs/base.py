@@ -85,10 +85,21 @@ def register_env(name: str, factory: Callable[[], BaseEnv]) -> None:
 
 
 @lru_cache(maxsize=256)
-def get_env(name: str, privileged: bool = False, enable_render: bool = False, viser_debug: bool = False) -> BaseEnv:
+def get_env(
+    name: str,
+    privileged: bool = False,
+    enable_render: bool = False,
+    viser_debug: bool = False,
+    render_camera_names: tuple[str, ...] | None = None,
+) -> BaseEnv:
     if name not in _ENV_FACTORIES:
         raise KeyError(f"Environment '{name}' not registered")
-    return _ENV_FACTORIES[name](privileged=privileged, enable_render=enable_render, viser_debug=viser_debug)
+    return _ENV_FACTORIES[name](
+        privileged=privileged,
+        enable_render=enable_render,
+        viser_debug=viser_debug,
+        render_camera_names=list(render_camera_names) if render_camera_names else None,
+    )
 
 
 def list_envs() -> list[str]:

@@ -40,12 +40,17 @@ class RobosuiteHandoverEnv(BaseEnv):
         viser_debug: bool = False,  # TODO: move the viser visualization manager into a separate class, low level env agnostic
         privileged: bool = False,
         enable_render: bool = False,
+        render_camera_names: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.controller_cfg = controller_cfg
         self.max_steps = max_steps
         self.save_camera_name = "agentview"  # Scene-level camera to show both arms
         self.render_camera_names = ["agentview"]  # Scene-level camera for observations
+        if render_camera_names is not None:
+            self.render_camera_names = list(render_camera_names)
+            self.save_camera_name = self.render_camera_names[0]
+        self._render_camera_names_override = render_camera_names
         self.segmentation_level = "instance"
 
         self._render_width = 512
@@ -614,7 +619,9 @@ class RobosuiteHandoverEnv(BaseEnv):
             ]
         )
 
-        if len(self.render_camera_names) == 1:
+        # Alias robot0_robotview -> primary view ONLY if it wasn't itself a rendered
+        # camera; otherwise aliasing would clobber its own (correct) images.
+        if self.render_camera_names and "robot0_robotview" not in self.render_camera_names:
             robosuite_obs["robot0_robotview"] = robosuite_obs[self.render_camera_names[0]]
 
         return robosuite_obs
@@ -625,6 +632,7 @@ class RobosuiteHandoverEnv(BaseEnv):
         self._record_frames = enabled
         if clear:
             self._frame_buffer.clear()
+            self._multiview_frame_buffers = {}
         if enabled:
             # Ensure camera position is set and capture first frame with correct position
             agentview_cam_id = self.robosuite_env.sim.model.camera_name2id("agentview")
@@ -639,6 +647,13 @@ class RobosuiteHandoverEnv(BaseEnv):
             self._frame_buffer.clear()
         return frames
 
+    def get_multiview_frames_range(self, start: int, end: int) -> dict[str, list[np.ndarray]]:
+        """Per-view frames for a turn: {view_name: frames[start:end]} (agentv2 Reflector)."""
+        return {
+            view: [f.copy() for f in buf[start:end]]
+            for view, buf in getattr(self, "_multiview_frame_buffers", {}).items()
+        }
+
     def _record_frame(self) -> None:
         if not self._record_frames:
             return
@@ -649,7 +664,24 @@ class RobosuiteHandoverEnv(BaseEnv):
             height=self._render_height,
             depth=False,
         )
-        self._frame_buffer.append(frame[::-1])  # Flip vertically
+        primary = frame[::-1]  # Flip vertically
+        self._frame_buffer.append(primary)
+
+        # agentv2: record every render camera under its own buffer for the Reflector.
+        if len(self.render_camera_names) > 1:
+            if not hasattr(self, "_multiview_frame_buffers"):
+                self._multiview_frame_buffers = {}
+            for view in self.render_camera_names:
+                if view == self.save_camera_name:
+                    vf = primary
+                else:
+                    vf = self.robosuite_env.sim.render(
+                        camera_name=view,
+                        width=self._render_width,
+                        height=self._render_height,
+                        depth=False,
+                    )[::-1]
+                self._multiview_frame_buffers.setdefault(view, []).append(vf)
 
     def render(self, mode: str = "rgb_array") -> np.ndarray:  # type: ignore[override]
         if mode != "rgb_array":

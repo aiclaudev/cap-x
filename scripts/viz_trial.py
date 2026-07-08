@@ -79,6 +79,14 @@ def b64_data_uri(path: Path) -> str | None:
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
 
 
+def rel_media_src(path: Path, tdir: Path) -> str:
+    """Relative URL from the report (written at tdir.parent) to a media file inside tdir.
+    Used for videos so report.html stays tiny (no MB-sized base64). Requires the report to be
+    SERVED alongside the output tree (Live Preview / http server) — not portable as a lone file."""
+    from urllib.parse import quote
+    return quote(f"{tdir.name}/{path.name}")
+
+
 def esc(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
@@ -334,11 +342,10 @@ def render_turns(responses: list, tdir: Path, vdm_by_turn: dict | None = None,
         if dec in ("initial", "regenerate"):
             vid = tdir / f"video_turn_{i:02d}.mp4"
             if vid.exists():
-                uri = b64_data_uri(vid)
-                if uri:
-                    parts.append(f'<div style="margin-top:8px"><b>🎬 실행결과 (전→후):</b> '
-                                 f'<span class="pin">{esc(vid.name)}</span><br>'
-                                 f'<video src="{uri}" controls muted loop></video></div>')
+                src = rel_media_src(vid, tdir)
+                parts.append(f'<div style="margin-top:8px"><b>🎬 실행결과 (전→후):</b> '
+                             f'<span class="pin">{esc(vid.name)}</span><br>'
+                             f'<video src="{src}" controls muted loop></video></div>')
             else:
                 parts.append('<p class="pin">🎬 실행결과: 영상 없음 — 이 턴은 로봇이 움직이지 않음 (코드 에러/무동작)</p>')
 
@@ -430,9 +437,8 @@ def render_media(tdir: Path, perc_dir: Path | None = None) -> str:
     # combined rollout video only (per-turn videos are now shown inline in each turn card)
     cv = tdir / "video_combined.mp4"
     if cv.exists():
-        uri = b64_data_uri(cv)
-        if uri:
-            parts.append(f'<h3>전체 롤아웃 영상 (combined)</h3><video src="{uri}" controls muted loop></video>')
+        src = rel_media_src(cv, tdir)
+        parts.append(f'<h3>전체 롤아웃 영상 (combined)</h3><video src="{src}" controls muted loop></video>')
     return "\n".join(parts)
 
 
@@ -469,20 +475,25 @@ def main():
     trial_dirs = sorted([d for d in root.iterdir() if d.is_dir() and d.name.startswith("trial_")])
 
     # A single multiturn trial writes one dir per intermediate turn-snapshot (same trial number,
-    # differing reward suffix). Collapse to the most complete dir per trial number so "1 run" shows
-    # exactly 1 card: rank by (#turn videos, reward) — the final attempt has the videos + best reward.
-    def _completeness(d: Path):
+    # differing reward suffix). Collapse to ONE dir per trial number so "1 run" shows exactly 1 card.
+    # Rank by (has turn videos, mtime): the FINAL save of the latest run is newest and carries the
+    # per-turn videos. Ranking by #videos alone is wrong when the same index was written by multiple
+    # separate runs — an older run with more turn videos would win and the report would show stale
+    # videos. mtime picks the latest run's final state; the has-videos flag avoids a video-less
+    # intermediate that happens to be newest.
+    def _rank(d: Path):
+        has_vid = len(list(d.glob("video_turn_*.mp4"))) > 0
         try:
-            rw = float(parse_trial_dirname(d.name).get("reward") or 0.0)
-        except ValueError:
-            rw = 0.0
-        return (len(list(d.glob("video_turn_*.mp4"))), rw)
+            mtime = d.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        return (has_vid, mtime)
 
     best: dict[str, Path] = {}
     for d in trial_dirs:
         m = re.match(r"(trial_\d+)", d.name)
         key = m.group(1) if m else d.name
-        if key not in best or _completeness(d) > _completeness(best[key]):
+        if key not in best or _rank(d) > _rank(best[key]):
             best[key] = d
     trial_dirs = [best[k] for k in sorted(best)]
 
@@ -535,7 +546,7 @@ def main():
 <p class="sub">{esc(str(root))} · trials: {len(trial_dirs)}</p>
 <h2>개요</h2>{overview}
 {''.join(sections)}
-<p class="pin" style="margin-top:30px">생성: scripts/viz_trial.py — 미디어는 base64 임베드(파일 단독 열람 가능).</p>
+<p class="pin" style="margin-top:30px">생성: scripts/viz_trial.py — 이미지=base64 임베드, 영상=파일 참조(상대경로) — 서버/Live Preview로 서빙 시 재생.</p>
 </div></body></html>"""
 
     out_path.write_text(htmldoc)

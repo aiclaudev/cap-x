@@ -53,6 +53,7 @@ class CodeExecEnvConfig:
     privileged: bool = False
     enable_render: bool = True
     viser_debug: bool = False
+    render_camera_names: list[str] | None = None
 
 
 class SimpleExecutor:
@@ -92,7 +93,7 @@ class CodeExecutionEnvBase(Env):
         super().__init__()
         self.cfg = cfg
         self.low_level_env: BaseEnv = self._build_low_level(
-            cfg.low_level, cfg.privileged, cfg.enable_render, cfg.viser_debug
+            cfg.low_level, cfg.privileged, cfg.enable_render, cfg.viser_debug, cfg.render_camera_names
         )  # type: ignore[assignment]
         # Create APIs once; maximize sharing inside a worker via lru_cache in get_api
         self._apis: dict[str, ApiBase] = {n: get_api(n)(self.low_level_env) for n in cfg.apis}
@@ -205,7 +206,12 @@ class CodeExecutionEnvBase(Env):
         self._exec_globals = g
 
     def _build_low_level(
-        self, src: Env | str, privileged: bool = False, enable_render: bool = True, viser_debug: bool = False
+        self,
+        src: Env | str,
+        privileged: bool = False,
+        enable_render: bool = True,
+        viser_debug: bool = False,
+        render_camera_names: list[str] | None = None,
     ) -> BaseEnv:
         """
         Builds the low level environment from the given source.
@@ -221,7 +227,13 @@ class CodeExecutionEnvBase(Env):
                     return cfg_instantiate(cfg)  # type: ignore[no-any-return]
                 return cfg  # type: ignore[return-value]
             else:
-                return get_env(src, privileged=privileged, enable_render=enable_render, viser_debug=viser_debug)
+                return get_env(
+                    src,
+                    privileged=privileged,
+                    enable_render=enable_render,
+                    viser_debug=viser_debug,
+                    render_camera_names=tuple(render_camera_names) if render_camera_names else None,
+                )
         return src
 
     def _get_observation(self) -> dict[str, Any]:
@@ -339,6 +351,12 @@ class CodeExecutionEnvBase(Env):
         if hasattr(self.low_level_env, "_frame_buffer"):
             return [f.copy() for f in self.low_level_env._frame_buffer[start:end]]
         return []
+
+    def get_multiview_frames_range(self, start: int, end: int) -> dict[str, list[np.ndarray]]:
+        """agentv2: per-view frames for a turn — {view_name: frames[start:end]}."""
+        if hasattr(self.low_level_env, "get_multiview_frames_range"):
+            return self.low_level_env.get_multiview_frames_range(start, end)
+        return {}
 
     def get_wrist_video_frames(self, *, clear: bool = False) -> list[np.ndarray]:
         if hasattr(self.low_level_env, "get_wrist_video_frames"):
